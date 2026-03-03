@@ -472,8 +472,11 @@ func runGateway() {
 	toolsReg.Register(skillSearchTool)
 	slog.Info("skill_search tool registered", "skills", len(skillsLoader.ListSkills()))
 
-	// Managed mode: wire embedding-based skill search
+	// Managed mode: wire embedding-based skill search + per-agent access filtering
 	if managedStores != nil && managedStores.Skills != nil {
+		if sas, ok := managedStores.Skills.(store.SkillAccessStore); ok {
+			skillSearchTool.SetSkillAccessStore(sas)
+		}
 		if pgSkills, ok := managedStores.Skills.(*pg.PGSkillStore); ok {
 			memCfg := cfg.Agents.Defaults.Memory
 			if embProvider := resolveEmbeddingProvider(cfg, memCfg); embProvider != nil {
@@ -621,7 +624,7 @@ func runGateway() {
 		}
 
 		contextFileInterceptor = wireManagedExtras(managedStores, agentRouter, providerRegistry, msgBus, sessStore, toolsReg, toolPE, skillsLoader, hasMemory, traceCollector, workspace, cfg.Gateway.InjectionAction, cfg, sandboxMgr, dynamicLoader)
-		agentsH, skillsH, tracesH, mcpH, customToolsH, channelInstancesH, providersH, delegationsH, builtinToolsH := wireManagedHTTP(managedStores, cfg.Gateway.Token, msgBus, toolsReg, providerRegistry, permPE.IsOwner, agentRouter.InvalidateAll)
+		agentsH, skillsH, tracesH, mcpH, customToolsH, channelInstancesH, providersH, delegationsH, builtinToolsH := wireManagedHTTP(managedStores, cfg.Gateway.Token, msgBus, toolsReg, providerRegistry, permPE.IsOwner)
 		if agentsH != nil {
 			server.SetAgentsHandler(agentsH)
 		}

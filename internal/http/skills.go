@@ -15,8 +15,10 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/store/pg"
+	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
 const maxSkillUploadSize = 20 << 20 // 20 MB
@@ -25,15 +27,26 @@ var slugRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
 
 // SkillsHandler handles skill management HTTP endpoints (managed mode).
 type SkillsHandler struct {
-	skills        *pg.PGSkillStore
-	baseDir       string // filesystem base for skill content
-	token         string
-	onGrantChange func() // callback to invalidate agent caches on grant/revoke
+	skills *pg.PGSkillStore
+	baseDir string // filesystem base for skill content
+	token   string
+	msgBus  *bus.MessageBus
 }
 
 // NewSkillsHandler creates a handler for skill management endpoints.
-func NewSkillsHandler(skills *pg.PGSkillStore, baseDir, token string, onGrantChange func()) *SkillsHandler {
-	return &SkillsHandler{skills: skills, baseDir: baseDir, token: token, onGrantChange: onGrantChange}
+func NewSkillsHandler(skills *pg.PGSkillStore, baseDir, token string, msgBus *bus.MessageBus) *SkillsHandler {
+	return &SkillsHandler{skills: skills, baseDir: baseDir, token: token, msgBus: msgBus}
+}
+
+// emitCacheInvalidate broadcasts a cache invalidation event if msgBus is set.
+func (h *SkillsHandler) emitCacheInvalidate(kind, key string) {
+	if h.msgBus == nil {
+		return
+	}
+	h.msgBus.Broadcast(bus.Event{
+		Name:    protocol.EventCacheInvalidate,
+		Payload: bus.CacheInvalidatePayload{Kind: kind, Key: key},
+	})
 }
 
 // RegisterRoutes registers all skill management routes on the given mux.

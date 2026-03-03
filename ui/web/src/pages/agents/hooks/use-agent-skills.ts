@@ -7,34 +7,52 @@ import type { SkillWithGrant } from "@/types/skill";
 export function useAgentSkills(agentId: string) {
   const http = useHttp();
   const queryClient = useQueryClient();
+  const queryKey = queryKeys.skills.agentGrants(agentId);
 
   const { data: skills = [], isLoading: loading } = useQuery({
-    queryKey: queryKeys.skills.agentGrants(agentId),
+    queryKey,
     queryFn: () =>
       http
         .get<{ skills: SkillWithGrant[] }>(`/v1/agents/${agentId}/skills`)
         .then((r) => r.skills ?? []),
   });
 
+  const optimisticToggle = useCallback(
+    (skillId: string, granted: boolean) => {
+      queryClient.setQueryData<SkillWithGrant[]>(queryKey, (old) =>
+        old?.map((s) => (s.id === skillId ? { ...s, granted } : s)),
+      );
+    },
+    [queryClient, queryKey],
+  );
+
   const invalidate = useCallback(
-    () => queryClient.invalidateQueries({ queryKey: queryKeys.skills.agentGrants(agentId) }),
-    [queryClient, agentId],
+    () => queryClient.invalidateQueries({ queryKey }),
+    [queryClient, queryKey],
   );
 
   const grantSkill = useCallback(
     async (skillId: string) => {
-      await http.post(`/v1/skills/${skillId}/grants/agent`, { agent_id: agentId });
-      await invalidate();
+      optimisticToggle(skillId, true);
+      try {
+        await http.post(`/v1/skills/${skillId}/grants/agent`, { agent_id: agentId });
+      } finally {
+        await invalidate();
+      }
     },
-    [http, agentId, invalidate],
+    [http, agentId, invalidate, optimisticToggle],
   );
 
   const revokeSkill = useCallback(
     async (skillId: string) => {
-      await http.delete(`/v1/skills/${skillId}/grants/agent/${agentId}`);
-      await invalidate();
+      optimisticToggle(skillId, false);
+      try {
+        await http.delete(`/v1/skills/${skillId}/grants/agent/${agentId}`);
+      } finally {
+        await invalidate();
+      }
     },
-    [http, agentId, invalidate],
+    [http, agentId, invalidate, optimisticToggle],
   );
 
   return { skills, loading, grantSkill, revokeSkill };

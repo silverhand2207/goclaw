@@ -2,6 +2,7 @@ package pg
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,11 +44,12 @@ func (s *PGSkillStore) ListAgentGrants(ctx context.Context, agentID uuid.UUID) (
 	for rows.Next() {
 		var g SkillGrantInfo
 		if err := rows.Scan(&g.SkillID, &g.PinnedVersion, &g.GrantedBy); err != nil {
+			slog.Warn("skill_grants: scan error in ListAgentGrants", "error", err)
 			continue
 		}
 		result = append(result, g)
 	}
-	return result, nil
+	return result, rows.Err()
 }
 
 // GrantToUser grants a skill to a user (for internal visibility skills).
@@ -98,6 +100,7 @@ func (s *PGSkillStore) ListAccessible(ctx context.Context, agentID uuid.UUID, us
 		var desc *string
 		var version int
 		if err := rows.Scan(&name, &slug, &desc, &version); err != nil {
+			slog.Warn("skill_grants: scan error in ListAccessible", "error", err)
 			continue
 		}
 		result = append(result, buildSkillInfo(name, slug, desc, version, s.baseDir))
@@ -143,6 +146,7 @@ func (s *PGSkillStore) ListWithGrantStatus(ctx context.Context, agentID uuid.UUI
 	for rows.Next() {
 		var r SkillWithGrantStatus
 		if err := rows.Scan(&r.ID, &r.Name, &r.Slug, &r.Description, &r.Visibility, &r.Version, &r.Granted, &r.PinnedVer); err != nil {
+			slog.Warn("skill_grants: scan error in ListWithGrantStatus", "error", err)
 			continue
 		}
 		result = append(result, r)

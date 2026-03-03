@@ -62,9 +62,6 @@ type ResolverDeps struct {
 
 	// Group file writer cache (managed mode)
 	GroupWriterCache *store.GroupWriterCache
-
-	// Per-agent skill filtering (managed mode)
-	SkillAccessStore store.SkillAccessStore // nil if not managed
 }
 
 // NewManagedResolver creates a ResolverFunc that builds Loops from DB agent data.
@@ -264,27 +261,8 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			}
 		}
 
-		// Per-agent skill filtering: merge filesystem slugs + DB-accessible slugs
-		var skillAllowList []string
-		if deps.SkillAccessStore != nil {
-			accessible, err := deps.SkillAccessStore.ListAccessible(ctx, ag.ID, "")
-			if err != nil {
-				slog.Warn("failed to load accessible skills", "agent", agentKey, "error", err)
-			}
-			if len(accessible) > 0 {
-				slugSet := make(map[string]struct{})
-				for _, s := range deps.Skills.ListSkills() {
-					slugSet[s.Slug] = struct{}{}
-				}
-				for _, s := range accessible {
-					slugSet[s.Slug] = struct{}{}
-				}
-				skillAllowList = make([]string, 0, len(slugSet))
-				for slug := range slugSet {
-					skillAllowList = append(skillAllowList, slug)
-				}
-			}
-		}
+		// Managed mode: SkillAllowList is nil (all filesystem skills available).
+		// Per-agent DB skill filtering is handled by skill_search tool via SkillAccessStore.
 
 		loop := NewLoop(LoopConfig{
 			ID:                ag.AgentKey,
@@ -301,7 +279,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			ToolPolicy:        deps.ToolPolicy,
 			AgentToolPolicy:   ag.ParseToolsConfig(),
 			SkillsLoader:      deps.Skills,
-			SkillAllowList:    skillAllowList,
+			// SkillAllowList: nil = all filesystem skills (managed DB skill filtering via skill_search)
 			HasMemory:         hasMemory,
 			ContextFiles:      contextFiles,
 			EnsureUserFiles:   deps.EnsureUserFiles,
