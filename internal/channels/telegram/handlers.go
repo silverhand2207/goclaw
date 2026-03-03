@@ -375,9 +375,10 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	_, thinkCancel := context.WithCancel(ctx)
 	c.stopThinking.Store(localKey, &thinkingCancel{fn: thinkCancel})
 
-	// Send placeholder message only for DMs.
-	// In groups the placeholder drifts away as new messages arrive;
-	// instead the response will be sent as a reply to the sender's message.
+	// Send "Thinking..." placeholder for DMs.
+	// The streaming system will edit this message progressively (editMessageText),
+	// giving a smooth transition: "Thinking..." → streaming chunks → final formatted response.
+	// Groups: no placeholder; response replies to the sender's message.
 	if !isGroup {
 		thinkMsg := tu.Message(chatIDObj, "Thinking...")
 		if dmThreadID > 0 {

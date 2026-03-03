@@ -33,7 +33,6 @@ func Default() *Config {
 		},
 		Channels: ChannelsConfig{
 			Telegram: TelegramConfig{
-				StreamMode:    "none",
 				ReactionLevel: "full",
 			},
 		},

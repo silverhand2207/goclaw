@@ -22,7 +22,8 @@ type telegramInstanceConfig struct {
 	GroupPolicy    string   `json:"group_policy,omitempty"`
 	RequireMention *bool    `json:"require_mention,omitempty"`
 	HistoryLimit   int      `json:"history_limit,omitempty"`
-	StreamMode     string   `json:"stream_mode,omitempty"`
+	DMStream       *bool    `json:"dm_stream,omitempty"`
+	GroupStream    *bool    `json:"group_stream,omitempty"`
 	ReactionLevel  string   `json:"reaction_level,omitempty"`
 	MediaMaxBytes  int64    `json:"media_max_bytes,omitempty"`
 	LinkPreview    *bool    `json:"link_preview,omitempty"`
@@ -73,7 +74,8 @@ func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
 		GroupPolicy:    ic.GroupPolicy,
 		RequireMention: ic.RequireMention,
 		HistoryLimit:   ic.HistoryLimit,
-		StreamMode:     ic.StreamMode,
+		DMStream:       ic.DMStream,
+		GroupStream:    ic.GroupStream,
 		ReactionLevel:  ic.ReactionLevel,
 		MediaMaxBytes:  ic.MediaMaxBytes,
 		LinkPreview:    ic.LinkPreview,

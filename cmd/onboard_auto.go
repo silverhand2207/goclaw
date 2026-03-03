@@ -231,7 +231,6 @@ func saveCleanConfig(cfgPath string, cfg *config.Config) error {
 		if cfg.Channels.Telegram.Enabled {
 			channels["telegram"] = map[string]interface{}{
 				"enabled":        true,
-				"stream_mode":    nonEmpty(cfg.Channels.Telegram.StreamMode, "none"),
 				"reaction_level": nonEmpty(cfg.Channels.Telegram.ReactionLevel, "full"),
 				"history_limit":  nonZero(cfg.Channels.Telegram.HistoryLimit, 50),
 			}

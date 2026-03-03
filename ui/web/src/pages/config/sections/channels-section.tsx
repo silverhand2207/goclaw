@@ -190,18 +190,16 @@ export function ChannelsSection({ data, onSave, saving }: Props) {
                     {/* Telegram-specific */}
                     {ch === "telegram" && (
                       <div className="grid grid-cols-2 gap-4">
-                        {chData.stream_mode !== undefined && (
-                          <div className="grid gap-1.5">
-                            <Label>Stream Mode</Label>
-                            <Select value={chData.stream_mode ?? "off"} onValueChange={(v) => updateChannel(ch, { stream_mode: v })}>
-                              <SelectTrigger><SelectValue /></SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="off">Off</SelectItem>
-                                <SelectItem value="partial">Partial</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        )}
+                        <div className="flex items-center gap-4">
+                          <label className="flex items-center gap-2 text-sm">
+                            <input type="checkbox" checked={!!chData.dm_stream} onChange={(e) => updateChannel(ch, { dm_stream: e.target.checked })} />
+                            DM Streaming
+                          </label>
+                          <label className="flex items-center gap-2 text-sm">
+                            <input type="checkbox" checked={!!chData.group_stream} onChange={(e) => updateChannel(ch, { group_stream: e.target.checked })} />
+                            Group Streaming
+                          </label>
+                        </div>
                         {chData.reaction_level !== undefined && (
                           <div className="grid gap-1.5">
                             <Label>Reaction Level</Label>

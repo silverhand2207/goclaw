@@ -79,7 +79,11 @@ type StreamingChannel interface {
 	// which gives more accurate token usage from providers that don't support
 	// stream_options (e.g. MiniMax). The channel still implements the interface
 	// so it can be toggled at runtime via config.
-	StreamEnabled() bool
+	//
+	// isGroup indicates whether this is a group chat (true) or DM (false).
+	// Channels may choose to always stream for DMs while gating group streaming
+	// behind config (e.g. Telegram uses sendMessageDraft for DMs).
+	StreamEnabled(isGroup bool) bool
 	OnStreamStart(ctx context.Context, chatID string) error
 	OnChunkEvent(ctx context.Context, chatID string, fullText string) error
 	OnStreamEnd(ctx context.Context, chatID string, finalText string) error

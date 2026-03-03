@@ -274,8 +274,9 @@ func (m *Manager) UnregisterRun(runID string) {
 }
 
 // IsStreamingChannel checks if a named channel implements StreamingChannel
-// AND has streaming currently enabled in its config (StreamEnabled() == true).
-func (m *Manager) IsStreamingChannel(channelName string) bool {
+// AND has streaming currently enabled for the given chat type.
+// isGroup: true for group chats, false for DMs.
+func (m *Manager) IsStreamingChannel(channelName string, isGroup bool) bool {
 	m.mu.RLock()
 	ch, exists := m.channels[channelName]
 	m.mu.RUnlock()
@@ -286,7 +287,7 @@ func (m *Manager) IsStreamingChannel(channelName string) bool {
 	if !ok {
 		return false
 	}
-	return sc.StreamEnabled()
+	return sc.StreamEnabled(isGroup)
 }
 
 // HandleAgentEvent routes agent lifecycle events to streaming/reaction channels.

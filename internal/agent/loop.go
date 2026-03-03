@@ -1157,6 +1157,10 @@ func (l *Loop) compactMessagesInPlace(ctx context.Context, messages []providers.
 // parseMediaResult extracts a MediaResult from a tool result string containing "MEDIA:" prefix.
 // Handles formats: "MEDIA:/path/to/file" and "[[audio_as_voice]]\nMEDIA:/path/to/file".
 // Returns nil if no MEDIA: prefix is found.
+//
+// IMPORTANT: Only matches "MEDIA:" at the start of the (trimmed) string to avoid false
+// positives when tool output contains "MEDIA:" in arbitrary text (e.g. a web page
+// mentioning a commit message like "return MEDIA: path from screenshot").
 func parseMediaResult(toolOutput string) *MediaResult {
 	s := toolOutput
 	asVoice := false
@@ -1165,15 +1169,15 @@ func parseMediaResult(toolOutput string) *MediaResult {
 	if strings.Contains(s, "[[audio_as_voice]]") {
 		asVoice = true
 		s = strings.ReplaceAll(s, "[[audio_as_voice]]", "")
-		s = strings.TrimSpace(s)
 	}
 
-	// Find MEDIA: prefix
-	idx := strings.Index(s, "MEDIA:")
-	if idx < 0 {
+	s = strings.TrimSpace(s)
+
+	// Only match MEDIA: at the beginning of the string.
+	if !strings.HasPrefix(s, "MEDIA:") {
 		return nil
 	}
-	path := strings.TrimSpace(s[idx+6:])
+	path := strings.TrimSpace(s[6:])
 	if path == "" {
 		return nil
 	}

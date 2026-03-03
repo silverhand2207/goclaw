@@ -15,7 +15,7 @@ import (
 // ChannelFactory creates a Channel from DB instance data.
 // name: channel name (registered in Manager, used in session keys).
 // creds: decrypted credentials JSON (token, API keys, etc.).
-// cfg: non-secret config JSONB (dm_policy, stream_mode, etc.).
+// cfg: non-secret config JSONB (dm_policy, dm_stream, group_stream, etc.).
 type ChannelFactory func(name string, creds json.RawMessage, cfg json.RawMessage,
 	msgBus *bus.MessageBus, pairingSvc store.PairingStore) (Channel, error)
 

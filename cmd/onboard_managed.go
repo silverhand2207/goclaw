@@ -173,7 +173,6 @@ func seedChannelInstances(ctx context.Context, stores *store.Stores, cfg *config
 		tgConfig := map[string]interface{}{
 			"dm_policy":      nonEmpty(cfg.Channels.Telegram.DMPolicy, "pairing"),
 			"group_policy":   nonEmpty(cfg.Channels.Telegram.GroupPolicy, "pairing"),
-			"stream_mode":    nonEmpty(cfg.Channels.Telegram.StreamMode, "none"),
 			"reaction_level": nonEmpty(cfg.Channels.Telegram.ReactionLevel, "full"),
 			"history_limit":  nonZero(cfg.Channels.Telegram.HistoryLimit, 50),
 		}

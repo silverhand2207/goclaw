@@ -185,10 +185,21 @@ func (c *Channel) Start(ctx context.Context) error {
 	return nil
 }
 
-// StreamEnabled reports whether streaming is active for this channel.
-// Returns true only when stream_mode is "partial".
-func (c *Channel) StreamEnabled() bool {
-	return c.config.StreamMode == "partial"
+// StreamEnabled reports whether streaming is active for the given chat type.
+// Controlled by separate dm_stream / group_stream config flags (both default false).
+//
+// DM streaming: edits "Thinking..." placeholder progressively via editMessageText.
+// Group streaming: sends a new message, edits progressively, hands off to Send().
+//
+// Both are disabled by default. sendMessageDraft (draft transport) code exists in the
+// codebase but is not used pending Telegram client-side fixes:
+//   - tdesktop#10315, bugs.telegram.org/c/561 — "reply to deleted message" artifacts
+//   - openclaw/openclaw#7803, openclaw/openclaw#32180 — community tracking
+func (c *Channel) StreamEnabled(isGroup bool) bool {
+	if isGroup {
+		return c.config.GroupStream != nil && *c.config.GroupStream
+	}
+	return c.config.DMStream != nil && *c.config.DMStream
 }
 
 // Stop shuts down the Telegram bot by cancelling the long polling context

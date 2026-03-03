@@ -122,11 +122,9 @@ func consumeInboundMessages(ctx context.Context, msgBus *bus.MessageBus, agents 
 		)
 
 		// Enable streaming when the channel supports it (so agent emits chunk events).
-		// Group chats: streaming disabled (concurrent runs would interleave chunks).
-		enableStream := channelMgr != nil && channelMgr.IsStreamingChannel(msg.Channel)
-		if peerKind == string(sessions.PeerGroup) {
-			enableStream = false
-		}
+		// The channel decides per chat type via separate dm_stream / group_stream flags.
+		isGroup := peerKind == string(sessions.PeerGroup)
+		enableStream := channelMgr != nil && channelMgr.IsStreamingChannel(msg.Channel, isGroup)
 
 		// Group chats allow concurrent runs (multiple users can chat simultaneously).
 		maxConcurrent := 1
@@ -204,10 +202,13 @@ func consumeInboundMessages(ctx context.Context, msgBus *bus.MessageBus, agents 
 		})
 
 		// Build outbound metadata for reply-to + thread routing.
-		// message_id → reply_to_message_id so Send() replies to user's message.
+		// Groups: reply to user's message so context is clear in busy chats.
+		// DMs: no reply needed — response edits the placeholder or sends inline.
 		outMeta := make(map[string]string)
-		if mid := msg.Metadata["message_id"]; mid != "" {
-			outMeta["reply_to_message_id"] = mid
+		if isGroup {
+			if mid := msg.Metadata["message_id"]; mid != "" {
+				outMeta["reply_to_message_id"] = mid
+			}
 		}
 		for _, k := range []string{"message_thread_id", "local_key", "placeholder_key", "group_id"} {
 			if v := msg.Metadata[k]; v != "" {
