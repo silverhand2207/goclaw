@@ -13,6 +13,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
+	"github.com/nextlevelbuilder/goclaw/internal/media"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -72,6 +73,9 @@ type ResolverDeps struct {
 
 	// Group file writer cache
 	GroupWriterCache *store.GroupWriterCache
+
+	// Persistent media storage for cross-turn image/document access
+	MediaStore *media.Store
 }
 
 // NewManagedResolver creates a ResolverFunc that builds Loops from DB agent data.
@@ -369,6 +373,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			ThinkingLevel:          ag.ParseThinkingLevel(),
 			GroupWriterCache:       deps.GroupWriterCache,
 			TeamStore:              deps.TeamStore,
+			MediaStore:             deps.MediaStore,
 		})
 
 		slog.Info("resolved agent from DB", "agent", agentKey, "model", ag.Model, "provider", ag.Provider)

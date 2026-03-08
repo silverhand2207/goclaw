@@ -196,6 +196,9 @@ export const Events = {
   AGENT_LINK_CREATED: "agent_link.created",
   AGENT_LINK_UPDATED: "agent_link.updated",
   AGENT_LINK_DELETED: "agent_link.deleted",
+
+  // Trace lifecycle
+  TRACE_UPDATED: "trace.updated",
 } as const;
 
 /** All event names relevant to team debug view */

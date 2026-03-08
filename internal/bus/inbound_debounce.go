@@ -152,7 +152,7 @@ func mergeInboundMessages(msgs []InboundMessage) InboundMessage {
 	last.Content = strings.Join(parts, "\n")
 
 	// Merge media from all messages.
-	var allMedia []string
+	var allMedia []MediaFile
 	for _, m := range msgs {
 		allMedia = append(allMedia, m.Media...)
 	}

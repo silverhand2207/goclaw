@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Dialog,
   DialogContent,
@@ -8,8 +8,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { ChevronRight, ChevronDown, Copy, Check } from "lucide-react";
 import { useClipboard } from "@/hooks/use-clipboard";
+import { useWsEvent } from "@/hooks/use-ws-event";
+import { Events } from "@/api/protocol";
 import { formatDate, formatDuration, formatTokens, computeDurationMs } from "@/lib/format";
 import type { TraceData, SpanData } from "./hooks/use-traces";
+import type { AgentEventPayload } from "@/types/chat";
 
 interface SpanNode {
   span: SpanData;
@@ -51,6 +54,15 @@ export function TraceDetailDialog({ traceId, onClose, getTrace, onNavigateTrace 
   const [loading, setLoading] = useState(true);
   const { copied, copy } = useClipboard();
 
+  const fetchTrace = useCallback(() => {
+    getTrace(traceId).then((result) => {
+      if (result) {
+        setTrace(result.trace);
+        setSpans(result.spans ?? []);
+      }
+    });
+  }, [traceId, getTrace]);
+
   useEffect(() => {
     setLoading(true);
     getTrace(traceId)
@@ -62,6 +74,34 @@ export function TraceDetailDialog({ traceId, onClose, getTrace, onNavigateTrace 
       })
       .finally(() => setLoading(false));
   }, [traceId, getTrace]);
+
+  // Auto-refetch when trace aggregates update (spans flushed every ~5s)
+  useWsEvent(
+    Events.TRACE_UPDATED,
+    useCallback(
+      (payload: unknown) => {
+        const data = payload as { trace_ids?: string[] };
+        if (data?.trace_ids?.includes(traceId)) {
+          fetchTrace();
+        }
+      },
+      [traceId, fetchTrace],
+    ),
+  );
+
+  // Also refetch on run completion (final status + output)
+  useWsEvent(
+    Events.AGENT,
+    useCallback(
+      (payload: unknown) => {
+        const event = payload as AgentEventPayload;
+        if (event?.type === "run.completed" || event?.type === "run.failed") {
+          fetchTrace();
+        }
+      },
+      [fetchTrace],
+    ),
+  );
 
   const spanTree = useMemo(() => buildSpanTree(spans), [spans]);
 

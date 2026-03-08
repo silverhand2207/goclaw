@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/sessions"
@@ -34,10 +35,11 @@ func (m *ChatMethods) Register(router *gateway.MethodRouter) {
 }
 
 type chatSendParams struct {
-	Message    string `json:"message"`
-	AgentID    string `json:"agentId"`
-	SessionKey string `json:"sessionKey"`
-	Stream     bool   `json:"stream"`
+	Message    string   `json:"message"`
+	AgentID    string   `json:"agentId"`
+	SessionKey string   `json:"sessionKey"`
+	Stream     bool     `json:"stream"`
+	Media      []string `json:"media,omitempty"` // local file paths from upload endpoint
 }
 
 func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
@@ -105,9 +107,16 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 		defer m.agents.UnregisterRun(runID)
 		defer cancel()
 
+		// Convert string paths to bus.MediaFile for the unified media pipeline.
+		var mediaFiles []bus.MediaFile
+		for _, p := range params.Media {
+			mediaFiles = append(mediaFiles, bus.MediaFile{Path: p})
+		}
+
 		result, err := loop.Run(runCtx, agent.RunRequest{
 			SessionKey: sessionKey,
 			Message:    params.Message,
+			Media:      mediaFiles,
 			Channel:    "ws",
 			ChatID:     client.ID(),
 			RunID:      runID,
@@ -124,11 +133,15 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 			return
 		}
 
-		client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
+		resp := map[string]interface{}{
 			"runId":   result.RunID,
 			"content": result.Content,
 			"usage":   result.Usage,
-		}))
+		}
+		if len(result.Media) > 0 {
+			resp["media"] = result.Media
+		}
+		client.SendResponse(protocol.NewOKResponse(req.ID, resp))
 	}()
 }
 

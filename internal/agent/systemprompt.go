@@ -67,6 +67,9 @@ var coreToolSummaries = map[string]string{
 	"session_status":   "Show session status (model, tokens, compaction count)",
 	"sessions_history": "Fetch message history for a session",
 	"sessions_send":    "Send a message into another session",
+	"read_image":       "Analyze images attached to the conversation. MUST call this when you see <media:image> tags",
+	"read_document":    "Analyze documents (PDF, DOCX, etc.) attached to the conversation. MUST call this when you see <media:document> tags",
+	"create_image":     "Generate images from text descriptions using AI",
 }
 
 // BuildSystemPrompt constructs the full system prompt with all sections.

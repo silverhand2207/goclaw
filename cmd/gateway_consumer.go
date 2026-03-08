@@ -225,7 +225,7 @@ func consumeInboundMessages(ctx context.Context, msgBus *bus.MessageBus, agents 
 
 		// Delegation announces carry media as ForwardMedia (not deleted, forwarded to output).
 		// User-uploaded media goes in Media (loaded as images for LLM, then deleted).
-		var reqMedia, fwdMedia []string
+		var reqMedia, fwdMedia []bus.MediaFile
 		if msg.Metadata["delegation_id"] != "" || msg.Metadata["subagent_id"] != "" {
 			fwdMedia = msg.Media
 		} else {
@@ -933,18 +933,21 @@ func mediaToMarkdown(media []agent.MediaResult, cfg *config.Config) string {
 
 // mediaToMarkdownFromPaths is like mediaToMarkdown but accepts raw file paths
 // ([]string from bus.InboundMessage.Media) instead of []agent.MediaResult.
-func mediaToMarkdownFromPaths(paths []string, cfg *config.Config) string {
-	if len(paths) == 0 {
+func mediaToMarkdownFromPaths(files []bus.MediaFile, cfg *config.Config) string {
+	if len(files) == 0 {
 		return ""
 	}
-	media := make([]agent.MediaResult, 0, len(paths))
-	for _, p := range paths {
-		ct := mime.TypeByExtension(filepath.Ext(p))
+	media := make([]agent.MediaResult, 0, len(files))
+	for _, f := range files {
+		ct := f.MimeType
+		if ct == "" {
+			ct = mime.TypeByExtension(filepath.Ext(f.Path))
+		}
 		if ct == "" {
 			ct = "application/octet-stream"
 		}
 		media = append(media, agent.MediaResult{
-			Path:        p,
+			Path:        f.Path,
 			ContentType: ct,
 		})
 	}

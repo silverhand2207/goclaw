@@ -34,6 +34,11 @@ func (s *PGSessionStore) Delete(key string) error {
 	delete(s.cache, key)
 	s.mu.Unlock()
 
+	// Clean up associated media files before deleting from DB.
+	if s.OnDelete != nil {
+		s.OnDelete(key)
+	}
+
 	_, err := s.db.Exec("DELETE FROM sessions WHERE session_key = $1", key)
 	return err
 }

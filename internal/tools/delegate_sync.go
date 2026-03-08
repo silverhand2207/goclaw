@@ -66,5 +66,5 @@ func (dm *DelegateManager) Delegate(ctx context.Context, opts DelegateOpts) (*De
 	dm.saveDelegationHistory(task, result.Content, nil, duration)
 	slog.Info("delegation completed", "id", task.ID, "target", opts.TargetAgentKey, "iterations", result.Iterations)
 
-	return &DelegateResult{Content: result.Content, Iterations: result.Iterations, DelegationID: task.ID, TeamTaskID: task.TeamTaskID.String(), MediaPaths: result.MediaPaths}, nil
+	return &DelegateResult{Content: result.Content, Iterations: result.Iterations, DelegationID: task.ID, TeamTaskID: task.TeamTaskID.String(), Media: result.Media}, nil
 }

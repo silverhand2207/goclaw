@@ -193,7 +193,22 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 
 	// Process media (photos, audio, voice, documents)
 	mediaList := c.resolveMedia(ctx, message)
-	var mediaPaths []string
+
+	// When user replies to a message with media, also resolve media from the replied message.
+	// This re-downloads the file from Telegram so the agent can analyze it even if the
+	// original turn was compacted out of session history.
+	if message.ReplyToMessage != nil && len(mediaList) == 0 {
+		replyMedia := c.resolveMedia(ctx, message.ReplyToMessage)
+		if len(replyMedia) > 0 {
+			mediaList = append(mediaList, replyMedia...)
+			slog.Debug("telegram: resolved media from replied message",
+				"reply_msg_id", message.ReplyToMessage.MessageID,
+				"media_count", len(replyMedia),
+			)
+		}
+	}
+
+	var mediaFiles []bus.MediaFile
 
 	if len(mediaList) > 0 {
 		// First pass: process each media item.
@@ -236,7 +251,10 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 			}
 
 			if m.FilePath != "" {
-				mediaPaths = append(mediaPaths, m.FilePath)
+				mediaFiles = append(mediaFiles, bus.MediaFile{
+					Path:     m.FilePath,
+					MimeType: m.ContentType,
+				})
 			}
 		}
 
@@ -439,7 +457,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		SenderID:     senderID,
 		ChatID:       chatIDStr,
 		Content:      finalContent,
-		Media:        mediaPaths,
+		Media:        mediaFiles,
 		PeerKind:     peerKind,
 		UserID:       userID,
 		AgentID:      targetAgentID,

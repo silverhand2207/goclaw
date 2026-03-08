@@ -1,6 +1,9 @@
 package tools
 
-import "github.com/nextlevelbuilder/goclaw/internal/providers"
+import (
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
+)
 
 // Result is the unified return type from tool execution.
 type Result struct {
@@ -11,8 +14,8 @@ type Result struct {
 	Async   bool   `json:"async"`               // running asynchronously
 	Err     error  `json:"-"`                   // internal error (not serialized)
 
-	// Media holds file paths to forward as output (e.g. images from delegation).
-	Media []string `json:"-"`
+	// Media holds media files to forward as output (e.g. images from delegation).
+	Media []bus.MediaFile `json:"-"`
 
 	// Deliverable holds the primary work output from this tool execution.
 	// Used to capture actual content (e.g. written file text, image prompt) for team

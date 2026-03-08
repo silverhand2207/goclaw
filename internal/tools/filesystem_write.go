@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/sandbox"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -140,7 +141,7 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]interface{}
 	result := SilentResult(fmt.Sprintf("File written: %s (%d bytes)", path, len(content)))
 	result.Deliverable = content
 	if deliver {
-		result.Media = []string{resolved}
+		result.Media = []bus.MediaFile{{Path: resolved}}
 	}
 	return result
 }
@@ -164,7 +165,7 @@ func (t *WriteFileTool) executeInSandbox(ctx context.Context, path, content, san
 			workspace = t.workspace
 		}
 		hostPath := filepath.Join(workspace, path)
-		result.Media = []string{hostPath}
+		result.Media = []bus.MediaFile{{Path: hostPath}}
 	}
 	return result
 }

@@ -354,15 +354,36 @@ func (l *Loop) maybeSummarize(ctx context.Context, sessionKey string) {
 		toSummarize := history[:len(history)-keepLast]
 
 		var sb string
+		var mediaKinds []string
 		for _, m := range toSummarize {
 			if m.Role == "user" {
 				sb += fmt.Sprintf("user: %s\n", m.Content)
 			} else if m.Role == "assistant" {
 				sb += fmt.Sprintf("assistant: %s\n", SanitizeAssistantContent(m.Content))
 			}
+			for _, ref := range m.MediaRefs {
+				mediaKinds = append(mediaKinds, ref.Kind)
+			}
 		}
 
 		prompt := "Provide a concise summary of this conversation, preserving key context:\n"
+		if len(mediaKinds) > 0 {
+			// Deduplicate and count media types for a compact note.
+			counts := make(map[string]int)
+			for _, k := range mediaKinds {
+				counts[k]++
+			}
+			prompt += "\nNote: user shared media files ("
+			first := true
+			for k, n := range counts {
+				if !first {
+					prompt += ", "
+				}
+				prompt += fmt.Sprintf("%d %s(s)", n, k)
+				first = false
+			}
+			prompt += ") which are no longer in context. Mention briefly if relevant.\n"
+		}
 		if summary != "" {
 			prompt += "Existing context: " + summary + "\n"
 		}

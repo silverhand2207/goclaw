@@ -255,12 +255,18 @@ func (c *BaseChannel) HandleMessage(senderID, chatID, content string, media []st
 		userID = senderID[:idx]
 	}
 
+	// Convert string paths to MediaFile (for channels that haven't been updated yet).
+	var mediaFiles []bus.MediaFile
+	for _, p := range media {
+		mediaFiles = append(mediaFiles, bus.MediaFile{Path: p})
+	}
+
 	msg := bus.InboundMessage{
 		Channel:  c.name,
 		SenderID: senderID,
 		ChatID:   chatID,
 		Content:  content,
-		Media:    media,
+		Media:    mediaFiles,
 		PeerKind: peerKind,
 		UserID:   userID,
 		Metadata: metadata,

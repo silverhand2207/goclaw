@@ -319,7 +319,7 @@ func buildDelegateMessage(opts DelegateOpts) string {
 }
 
 func (dm *DelegateManager) buildRunRequest(task *DelegationTask, message string) DelegateRunRequest {
-	return DelegateRunRequest{
+	req := DelegateRunRequest{
 		SessionKey: task.SessionKey,
 		Message:    message,
 		UserID:     task.UserID,
@@ -340,4 +340,38 @@ func (dm *DelegateManager) buildRunRequest(task *DelegationTask, message string)
 		TeamTaskID:    func() string { if task.TeamTaskID != uuid.Nil { return task.TeamTaskID.String() }; return "" }(),
 		ParentAgentID: task.SourceAgentKey,
 	}
+
+	// Propagate parent's recent image media to delegate for vision context.
+	if dm.mediaLoader != nil && dm.sessionStore != nil && task.OriginSessionKey != "" {
+		req.Media = dm.resolveParentMedia(task.OriginSessionKey)
+	}
+
+	return req
+}
+
+// resolveParentMedia loads image media files from the parent session's recent MediaRefs.
+func (dm *DelegateManager) resolveParentMedia(parentSessionKey string) []bus.MediaFile {
+	history := dm.sessionStore.GetHistory(parentSessionKey)
+	if len(history) == 0 {
+		return nil
+	}
+
+	// Scan last 5 messages for image MediaRefs.
+	var files []bus.MediaFile
+	count := 0
+	for i := len(history) - 1; i >= 0 && count < 5; i-- {
+		if len(history[i].MediaRefs) == 0 {
+			continue
+		}
+		for _, ref := range history[i].MediaRefs {
+			if ref.Kind != "image" {
+				continue
+			}
+			if p, err := dm.mediaLoader.LoadPath(ref.ID); err == nil {
+				files = append(files, bus.MediaFile{Path: p, MimeType: ref.MimeType})
+			}
+		}
+		count++
+	}
+	return files
 }

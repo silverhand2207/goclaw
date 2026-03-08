@@ -246,7 +246,7 @@ func runGateway() {
 					batchMeta["origin_session_key"] = meta.OriginSessionKey
 				}
 				// Collect media from all items in the batch.
-				var batchMedia []string
+				var batchMedia []bus.MediaFile
 				for _, item := range items {
 					batchMedia = append(batchMedia, item.Media...)
 				}
@@ -346,6 +346,16 @@ func runGateway() {
 	}
 	if pgStores.Tracing != nil {
 		traceCollector = tracing.NewCollector(pgStores.Tracing)
+		traceCollector.OnFlush = func(traceIDs []uuid.UUID) {
+			ids := make([]string, len(traceIDs))
+			for i, id := range traceIDs {
+				ids[i] = id.String()
+			}
+			msgBus.Broadcast(bus.Event{
+				Name:    protocol.EventTraceUpdated,
+				Payload: map[string]any{"trace_ids": ids},
+			})
+		}
 		traceCollector.Start()
 		slog.Info("LLM tracing enabled")
 	}

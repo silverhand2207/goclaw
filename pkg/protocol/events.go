@@ -56,6 +56,9 @@ const (
 	EventAgentLinkUpdated = "agent_link.updated"
 	EventAgentLinkDeleted = "agent_link.deleted"
 
+	// Trace lifecycle events (realtime trace/span updates).
+	EventTraceUpdated = "trace.updated"
+
 	// Cache invalidation events (internal, not forwarded to WS clients).
 	EventCacheInvalidate = "cache.invalidate"
 

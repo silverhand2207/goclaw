@@ -260,9 +260,9 @@ Briefly tell the user what you've delegated and to whom. Be friendly and natural
 	}
 
 	mediaNote := ""
-	if len(result.MediaPaths) > 0 {
+	if len(result.Media) > 0 {
 		mediaNote = fmt.Sprintf("\n\n[%d media file(s) attached — will be delivered automatically. Do NOT recreate or call create_image.]",
-			len(result.MediaPaths))
+			len(result.Media))
 	}
 
 	forLLM := fmt.Sprintf(
@@ -273,8 +273,8 @@ Briefly tell the user what you've delegated and to whom. Be friendly and natural
 		agentKey, result.Iterations, result.Content, mediaNote)
 
 	toolResult := NewResult(forLLM)
-	if len(result.MediaPaths) > 0 {
-		toolResult.Media = result.MediaPaths
+	if len(result.Media) > 0 {
+		toolResult.Media = result.Media
 	}
 	return toolResult
 }

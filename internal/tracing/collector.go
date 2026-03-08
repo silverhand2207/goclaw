@@ -48,6 +48,10 @@ type Collector struct {
 
 	verbose  bool         // when true, LLM spans include full input messages
 	exporter SpanExporter // optional external exporter (nil = disabled)
+
+	// OnFlush is called after each flush cycle with the trace IDs that had
+	// their aggregates updated. Used to broadcast realtime trace events.
+	OnFlush func(traceIDs []uuid.UUID)
 }
 
 // NewCollector creates a new tracing collector backed by the given store.
@@ -214,6 +218,15 @@ done:
 			if err := c.store.BatchUpdateTraceAggregates(ctx, traceID); err != nil {
 				slog.Warn("tracing: aggregate update failed", "trace_id", traceID, "error", err)
 			}
+		}
+
+		// Notify listeners about updated traces (realtime WS push).
+		if c.OnFlush != nil {
+			ids := make([]uuid.UUID, 0, len(dirty))
+			for id := range dirty {
+				ids = append(ids, id)
+			}
+			c.OnFlush(ids)
 		}
 	}
 }

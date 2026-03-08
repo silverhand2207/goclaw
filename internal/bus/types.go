@@ -2,13 +2,20 @@ package bus
 
 import "context"
 
+// MediaFile represents an inbound media file with its MIME type.
+// Used throughout the media pipeline to preserve content type from channel download to storage.
+type MediaFile struct {
+	Path     string `json:"path"`
+	MimeType string `json:"mime_type,omitempty"` // e.g. "application/pdf", "image/jpeg"
+}
+
 // InboundMessage represents a message received from a channel (Telegram, Discord, etc.)
 type InboundMessage struct {
 	Channel      string            `json:"channel"`
 	SenderID     string            `json:"sender_id"`
 	ChatID       string            `json:"chat_id"`
 	Content      string            `json:"content"`
-	Media        []string          `json:"media,omitempty"`
+	Media        []MediaFile       `json:"media,omitempty"`
 	SessionKey   string            `json:"session_key"`             // deprecated: gateway builds canonical key
 	PeerKind     string            `json:"peer_kind,omitempty"`     // "direct" or "group" (used for session key)
 	AgentID      string            `json:"agent_id,omitempty"`      // target agent (for multi-agent routing)

@@ -83,6 +83,9 @@ type DelegateRunRequest struct {
 	ExtraSystemPrompt string
 	MaxIterations     int // per-delegation override (0 = use agent default)
 
+	// Media propagation: parent's media files for delegate's vision context.
+	Media []bus.MediaFile
+
 	// Delegation context (bridged to agent.RunRequest for event enrichment)
 	DelegationID  string
 	TeamID        string
@@ -94,15 +97,15 @@ type DelegateRunRequest struct {
 type DelegateRunResult struct {
 	Content      string
 	Iterations   int
-	MediaPaths   []string // media file paths from tool results (e.g. generated images)
-	Deliverables []string // actual content from tool outputs (e.g. written file text, image prompt)
+	Media        []bus.MediaFile // media files from tool results (e.g. generated images)
+	Deliverables []string        // actual content from tool outputs (e.g. written file text, image prompt)
 }
 
 // DelegateArtifacts holds forwarded artifacts from delegation results.
 // Used to accumulate artifacts from intermediate completions until the final
 // announce fires. New artifact types (files, voice, etc.) should be added here.
 type DelegateArtifacts struct {
-	Media            []string                // file paths to forward (images, documents, audio, etc.)
+	Media            []bus.MediaFile         // media files to forward (images, documents, audio, etc.)
 	Results          []DelegateResultSummary // result summaries from completed delegations
 	CompletedTaskIDs []string                // team task IDs auto-completed by delegations (for announce context)
 }
@@ -127,7 +130,7 @@ type DelegateResult struct {
 	Iterations   int
 	DelegationID string   // for async: the delegation ID to track/cancel
 	TeamTaskID   string   // auto-created or provided team task ID (for tracing)
-	MediaPaths   []string // media file paths from delegation result
+	Media        []bus.MediaFile // media files from delegation result
 }
 
 // linkSettings holds per-user restriction rules from agent_links.settings JSONB.
@@ -138,6 +141,12 @@ type linkSettings struct {
 	UserDeny    []string `json:"user_deny"`
 }
 
+// MediaPathLoader resolves a media ID to a local file path.
+// Used to propagate parent images to delegates without importing the media package.
+type MediaPathLoader interface {
+	LoadPath(id string) (string, error)
+}
+
 // DelegateManager manages inter-agent delegation lifecycle.
 // Similar to SubagentManager but delegates to fully-configured named agents.
 type DelegateManager struct {
@@ -146,6 +155,7 @@ type DelegateManager struct {
 	agentStore   store.AgentStore
 	teamStore    store.TeamStore     // optional: enables auto-complete of team tasks
 	sessionStore store.SessionStore  // optional: enables session cleanup
+	mediaLoader  MediaPathLoader    // optional: enables image propagation to delegates
 	msgBus       *bus.MessageBus     // for event broadcast + async announce (PublishInbound)
 	hookEngine   *hooks.Engine       // optional: quality gate evaluation
 
@@ -185,6 +195,11 @@ func (dm *DelegateManager) SetSessionStore(ss store.SessionStore) {
 // SetHookEngine enables quality gate evaluation on delegation results.
 func (dm *DelegateManager) SetHookEngine(engine *hooks.Engine) {
 	dm.hookEngine = engine
+}
+
+// SetMediaLoader enables image propagation from parent to delegate agents.
+func (dm *DelegateManager) SetMediaLoader(ml MediaPathLoader) {
+	dm.mediaLoader = ml
 }
 
 // SetProgressEnabled toggles "Your team is working on it..." chat notifications.

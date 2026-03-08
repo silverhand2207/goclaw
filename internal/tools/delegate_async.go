@@ -89,12 +89,12 @@ func (dm *DelegateManager) DelegateAsync(ctx context.Context, opts DelegateOpts)
 				// need to call team_tasks to aggregate.
 				arts := &DelegateArtifacts{}
 				if result != nil {
-					arts.Media = result.MediaPaths
+					arts.Media = result.Media
 					arts.Results = []DelegateResultSummary{{
 						AgentKey:     task.TargetAgentKey,
 						DisplayName:  task.TargetDisplayName,
 						Content:      result.Content,
-						HasMedia:     len(result.MediaPaths) > 0,
+						HasMedia:     len(result.Media) > 0,
 						Deliverables: result.Deliverables,
 					}}
 				} else if runErr != nil {
@@ -139,12 +139,12 @@ func (dm *DelegateManager) DelegateAsync(ctx context.Context, opts DelegateOpts)
 				// Last completion: collect all accumulated artifacts + own result
 				artifacts := dm.collectArtifacts(oKey)
 				if result != nil {
-					artifacts.Media = append(artifacts.Media, result.MediaPaths...)
+					artifacts.Media = append(artifacts.Media, result.Media...)
 					artifacts.Results = append(artifacts.Results, DelegateResultSummary{
 						AgentKey:     task.TargetAgentKey,
 						DisplayName:  task.TargetDisplayName,
 						Content:      result.Content,
-						HasMedia:     len(result.MediaPaths) > 0,
+						HasMedia:     len(result.Media) > 0,
 						Deliverables: result.Deliverables,
 					})
 				}

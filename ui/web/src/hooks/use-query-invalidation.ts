@@ -12,16 +12,27 @@ import type { AgentEventPayload } from "@/types/chat";
 export function useWsQueryInvalidation() {
   const queryClient = useQueryClient();
 
-  // When an agent run completes/fails → refresh sessions + traces + usage
+  // When an agent run starts/completes/fails → refresh sessions + traces + usage
   const handleAgentEvent = useCallback(
     (payload: unknown) => {
       const event = payload as AgentEventPayload;
       if (!event) return;
+      if (event.type === "run.started") {
+        queryClient.invalidateQueries({ queryKey: queryKeys.traces.all });
+      }
       if (event.type === "run.completed" || event.type === "run.failed") {
         queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
         queryClient.invalidateQueries({ queryKey: queryKeys.traces.all });
         queryClient.invalidateQueries({ queryKey: queryKeys.usage.all });
       }
+    },
+    [queryClient],
+  );
+
+  // Trace aggregate updates (spans flushed) → refresh traces list
+  const handleTraceUpdated = useCallback(
+    () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.traces.all });
     },
     [queryClient],
   );
@@ -43,6 +54,7 @@ export function useWsQueryInvalidation() {
   );
 
   useWsEvent(Events.AGENT, handleAgentEvent);
+  useWsEvent(Events.TRACE_UPDATED, handleTraceUpdated);
   useWsEvent(Events.CRON, handleCronEvent);
   useWsEvent(Events.HEALTH, handleHealthEvent);
 }

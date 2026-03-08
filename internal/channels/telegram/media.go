@@ -54,15 +54,10 @@ func (c *Channel) resolveMedia(ctx context.Context, msg *telego.Message) []Media
 		if err != nil {
 			slog.Warn("failed to download photo", "file_id", photo.FileID, "error", err)
 		} else {
-			// Sanitize image for LLM vision
-			sanitized, sanitizeErr := sanitizeImage(filePath)
-			if sanitizeErr != nil {
-				slog.Warn("failed to sanitize image, using original", "error", sanitizeErr)
-				sanitized = filePath
-			}
+			// Pass raw file to agent loop — sanitization now happens at loop level.
 			results = append(results, MediaInfo{
 				Type:        "image",
-				FilePath:    sanitized,
+				FilePath:    filePath,
 				FileID:      photo.FileID,
 				ContentType: "image/jpeg",
 				FileSize:    int64(photo.FileSize),
@@ -72,34 +67,52 @@ func (c *Channel) resolveMedia(ctx context.Context, msg *telego.Message) []Media
 
 	// Video
 	if msg.Video != nil {
-		results = append(results, MediaInfo{
-			Type:        "video",
-			FileID:      msg.Video.FileID,
-			ContentType: msg.Video.MimeType,
-			FileName:    msg.Video.FileName,
-			FileSize:    int64(msg.Video.FileSize),
-		})
+		filePath, err := c.downloadMedia(ctx, msg.Video.FileID, maxBytes)
+		if err != nil {
+			slog.Warn("failed to download video", "file_id", msg.Video.FileID, "error", err)
+		} else {
+			results = append(results, MediaInfo{
+				Type:        "video",
+				FilePath:    filePath,
+				FileID:      msg.Video.FileID,
+				ContentType: msg.Video.MimeType,
+				FileName:    msg.Video.FileName,
+				FileSize:    int64(msg.Video.FileSize),
+			})
+		}
 	}
 
 	// Video Note (round video)
 	if msg.VideoNote != nil {
-		results = append(results, MediaInfo{
-			Type:        "video",
-			FileID:      msg.VideoNote.FileID,
-			ContentType: "video/mp4",
-			FileSize:    int64(msg.VideoNote.FileSize),
-		})
+		filePath, err := c.downloadMedia(ctx, msg.VideoNote.FileID, maxBytes)
+		if err != nil {
+			slog.Warn("failed to download video note", "file_id", msg.VideoNote.FileID, "error", err)
+		} else {
+			results = append(results, MediaInfo{
+				Type:        "video",
+				FilePath:    filePath,
+				FileID:      msg.VideoNote.FileID,
+				ContentType: "video/mp4",
+				FileSize:    int64(msg.VideoNote.FileSize),
+			})
+		}
 	}
 
 	// Animation (GIF)
 	if msg.Animation != nil {
-		results = append(results, MediaInfo{
-			Type:        "animation",
-			FileID:      msg.Animation.FileID,
-			ContentType: msg.Animation.MimeType,
-			FileName:    msg.Animation.FileName,
-			FileSize:    int64(msg.Animation.FileSize),
-		})
+		filePath, err := c.downloadMedia(ctx, msg.Animation.FileID, maxBytes)
+		if err != nil {
+			slog.Warn("failed to download animation", "file_id", msg.Animation.FileID, "error", err)
+		} else {
+			results = append(results, MediaInfo{
+				Type:        "animation",
+				FilePath:    filePath,
+				FileID:      msg.Animation.FileID,
+				ContentType: msg.Animation.MimeType,
+				FileName:    msg.Animation.FileName,
+				FileSize:    int64(msg.Animation.FileSize),
+			})
+		}
 	}
 
 	// Audio
@@ -251,7 +264,11 @@ func buildMediaTags(mediaList []MediaInfo) string {
 				tags = append(tags, "<media:voice>")
 			}
 		case "document":
-			tags = append(tags, "<media:document>")
+			if m.FileName != "" {
+				tags = append(tags, fmt.Sprintf("<media:document name=%q>", m.FileName))
+			} else {
+				tags = append(tags, "<media:document>")
+			}
 		}
 	}
 	return strings.Join(tags, "\n")
@@ -303,7 +320,9 @@ func extractDocumentContent(filePath, fileName string) (string, error) {
 	ext := strings.ToLower(filepath.Ext(fileName))
 	mime, isText := textExtensions[ext]
 	if !isText {
-		return fmt.Sprintf("[File: %s — binary format not supported, only text files can be processed]", fileName), nil
+		// Binary files (PDF, DOCX, etc.) are persisted via MediaRef and analyzed
+		// by the read_document tool. Return a hint instead of "not supported" placeholder.
+		return fmt.Sprintf("[File: %s — use read_document tool to analyze this file]", fileName), nil
 	}
 
 	data, err := os.ReadFile(filePath)

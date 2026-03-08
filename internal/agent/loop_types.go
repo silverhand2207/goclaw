@@ -10,6 +10,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/media"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -102,6 +103,9 @@ type Loop struct {
 
 	// Team store for cross-session pending task detection
 	teamStore store.TeamStore
+
+	// Persistent media storage for cross-turn image/document access
+	mediaStore *media.Store
 }
 
 // AgentEvent is emitted during agent execution for WS broadcasting.
@@ -186,6 +190,9 @@ type LoopConfig struct {
 
 	// Team store for cross-session pending task detection
 	TeamStore store.TeamStore
+
+	// Persistent media storage for cross-turn image/document access
+	MediaStore *media.Store
 }
 
 func NewLoop(cfg LoopConfig) *Loop {
@@ -248,6 +255,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		thinkingLevel:         cfg.ThinkingLevel,
 		groupWriterCache:      cfg.GroupWriterCache,
 		teamStore:             cfg.TeamStore,
+		mediaStore:            cfg.MediaStore,
 	}
 }
 
@@ -255,8 +263,8 @@ func NewLoop(cfg LoopConfig) *Loop {
 type RunRequest struct {
 	SessionKey       string // composite key: agent:{agentId}:{channel}:{peerKind}:{chatId}
 	Message          string // user message
-	Media            []string // local file paths to images (already sanitized)
-	ForwardMedia     []string // media paths to forward to output (not deleted, from delegation results)
+	Media            []bus.MediaFile // local media files with MIME types
+	ForwardMedia     []bus.MediaFile // media files to forward to output (from delegation results)
 	Channel          string // source channel
 	ChatID           string // source chat ID
 	PeerKind         string // "direct" or "group" (for session key building and tool context)

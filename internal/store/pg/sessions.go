@@ -18,6 +18,9 @@ type PGSessionStore struct {
 	mu sync.RWMutex
 	// In-memory cache for hot sessions (reduces DB reads during tool loops)
 	cache map[string]*store.SessionData
+	// OnDelete is called with the session key when a session is deleted.
+	// Used for media file cleanup.
+	OnDelete func(sessionKey string)
 }
 
 func NewPGSessionStore(db *sql.DB) *PGSessionStore {

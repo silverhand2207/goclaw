@@ -166,7 +166,7 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 	}
 
 	// Run LLM iteration loop (similar to agent loop but simplified)
-	var mediaPaths []string
+	var mediaFiles []bus.MediaFile
 	maxIterations := 20
 
 	for iteration < maxIterations {
@@ -229,7 +229,7 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 
 			// Capture media file paths from tool results (e.g. image generation).
 			if len(result.Media) > 0 {
-				mediaPaths = append(mediaPaths, result.Media...)
+				mediaFiles = append(mediaFiles, result.Media...)
 			} else if strings.HasPrefix(strings.TrimSpace(result.ForLLM), "MEDIA:") {
 				// Fallback: parse MEDIA: prefix from ForLLM (same as agent loop's parseMediaResult)
 				p := strings.TrimSpace(strings.TrimSpace(result.ForLLM)[6:])
@@ -237,7 +237,7 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 					p = strings.TrimSpace(p[:nl])
 				}
 				if p != "" {
-					mediaPaths = append(mediaPaths, p)
+					mediaFiles = append(mediaFiles, bus.MediaFile{Path: p})
 				}
 			}
 
@@ -255,7 +255,7 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 	}
 	task.Status = TaskStatusCompleted
 	task.Result = finalContent
-	task.Media = mediaPaths
+	task.Media = mediaFiles
 	sm.mu.Unlock()
 
 	slog.Info("subagent completed", "id", task.ID, "iterations", iteration)

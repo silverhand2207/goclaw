@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -292,20 +293,66 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 	// (hadBootstrap) — no extra DB roundtrip needed for bootstrap detection.
 	messages, hadBootstrap := l.buildMessages(ctx, history, summary, req.Message, req.ExtraSystemPrompt, req.SessionKey, req.Channel, req.PeerKind, req.UserID, req.HistoryLimit, req.SkillFilter)
 
-	// 2. Attach vision images to the current user message (last in messages slice).
-	// Images are only attached to the live request, NOT persisted in session history.
+	// 1b. Determine image routing strategy.
+	// If read_image tool has a dedicated vision provider, images are NOT attached inline
+	// to the main LLM — the agent calls read_image tool instead. This avoids sending
+	// images to providers that don't support vision or have strict content filters.
+	deferToReadImageTool := l.hasReadImageProvider()
+
+	if !deferToReadImageTool {
+		// Inline mode: reload historical images directly into messages for main provider.
+		l.reloadMediaForMessages(messages, maxMediaReloadMessages)
+	}
+
+	// 2. Process media: sanitize images, persist to media store.
+	var mediaRefs []providers.MediaRef
 	if len(req.Media) > 0 {
-		if images := loadImages(req.Media); len(images) > 0 {
-			messages[len(messages)-1].Images = images
-			ctx = tools.WithMediaImages(ctx, images) // make images available to read_image tool
-			slog.Info("vision: attached images to user message", "count", len(images), "agent", l.id, "session", req.SessionKey)
-		}
-		// Clean up temp media files — they're now base64-encoded in memory.
-		for _, p := range req.Media {
-			if err := os.Remove(p); err != nil {
-				slog.Debug("vision: failed to clean temp media file", "path", p, "error", err)
+		mediaRefs = l.persistMedia(req.SessionKey, req.Media)
+		// Load current-turn images from persisted refs.
+		var imageFiles []bus.MediaFile
+		for _, ref := range mediaRefs {
+			if ref.Kind == "image" {
+				if p, err := l.mediaStore.LoadPath(ref.ID); err == nil {
+					imageFiles = append(imageFiles, bus.MediaFile{Path: p, MimeType: ref.MimeType})
+				}
 			}
 		}
+		if images := loadImages(imageFiles); len(images) > 0 {
+			if deferToReadImageTool {
+				// Tool mode: store in context only — agent calls read_image tool.
+				ctx = tools.WithMediaImages(ctx, images)
+				slog.Info("vision: deferring to read_image tool", "count", len(images), "agent", l.id)
+			} else {
+				// Inline mode: attach to message + context.
+				messages[len(messages)-1].Images = images
+				ctx = tools.WithMediaImages(ctx, images)
+				slog.Info("vision: attached images inline to main provider", "count", len(images), "agent", l.id)
+			}
+		}
+	}
+
+	// 2a. Tool mode: also load historical images into context for read_image tool.
+	// Without this, read_image can only see current-turn images, not previous turns.
+	if deferToReadImageTool && l.mediaStore != nil {
+		ctx = l.loadHistoricalImagesForTool(ctx, mediaRefs, messages)
+	}
+
+	// 2b. Collect document MediaRefs (current + historical) for read_document tool.
+	var docRefs []providers.MediaRef
+	for _, ref := range mediaRefs {
+		if ref.Kind == "document" {
+			docRefs = append(docRefs, ref)
+		}
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		for _, ref := range messages[i].MediaRefs {
+			if ref.Kind == "document" {
+				docRefs = append(docRefs, ref)
+			}
+		}
+	}
+	if len(docRefs) > 0 {
+		ctx = tools.WithMediaDocRefs(ctx, docRefs)
 	}
 
 	// 2b. Cross-session recovery: notify team leads about orphaned pending tasks
@@ -353,12 +400,13 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 
 	// 3. Buffer new messages — write to session only AFTER the run completes.
 	// This prevents concurrent runs from seeing each other's in-progress messages.
-	// NOTE: pendingMsgs stores TEXT ONLY (no images) to avoid bloating session storage.
+	// NOTE: pendingMsgs stores text + lightweight MediaRefs (not base64 images).
 	var pendingMsgs []providers.Message
 	if !req.HideInput {
 		pendingMsgs = append(pendingMsgs, providers.Message{
-			Role:    "user",
-			Content: req.Message,
+			Role:      "user",
+			Content:   req.Message,
+			MediaRefs: mediaRefs,
 		})
 	}
 
@@ -690,8 +738,12 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 			// Collect MEDIA: paths from tool results.
 			// Prefer result.Media (explicit) over ForLLM MEDIA: prefix (legacy) to avoid duplicates.
 			if len(result.Media) > 0 {
-				for _, p := range result.Media {
-					mediaResults = append(mediaResults, MediaResult{Path: p, ContentType: mimeFromExt(filepath.Ext(p))})
+				for _, mf := range result.Media {
+					ct := mf.MimeType
+					if ct == "" {
+						ct = mimeFromExt(filepath.Ext(mf.Path))
+					}
+					mediaResults = append(mediaResults, MediaResult{Path: mf.Path, ContentType: ct})
 				}
 			} else if mr := parseMediaResult(result.ForLLM); mr != nil {
 				mediaResults = append(mediaResults, *mr)
@@ -825,8 +877,12 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 				// Collect MEDIA: paths from tool results.
 				// Prefer result.Media (explicit) over ForLLM MEDIA: prefix (legacy) to avoid duplicates.
 				if len(r.result.Media) > 0 {
-					for _, p := range r.result.Media {
-						mediaResults = append(mediaResults, MediaResult{Path: p, ContentType: mimeFromExt(filepath.Ext(p))})
+					for _, mf := range r.result.Media {
+						ct := mf.MimeType
+						if ct == "" {
+							ct = mimeFromExt(filepath.Ext(mf.Path))
+						}
+						mediaResults = append(mediaResults, MediaResult{Path: mf.Path, ContentType: ct})
 					}
 				} else if mr := parseMediaResult(r.result.ForLLM); mr != nil {
 					mediaResults = append(mediaResults, *mr)
@@ -942,8 +998,12 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 	l.maybeSummarize(ctx, req.SessionKey)
 
 	// Include forwarded media from delegation results (not cleaned up like req.Media)
-	for _, p := range req.ForwardMedia {
-		mediaResults = append(mediaResults, MediaResult{Path: p, ContentType: mimeFromExt(filepath.Ext(p))})
+	for _, mf := range req.ForwardMedia {
+		ct := mf.MimeType
+		if ct == "" {
+			ct = mimeFromExt(filepath.Ext(mf.Path))
+		}
+		mediaResults = append(mediaResults, MediaResult{Path: mf.Path, ContentType: ct})
 	}
 
 	return &RunResult{

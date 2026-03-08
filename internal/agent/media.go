@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
 
@@ -15,25 +16,28 @@ const maxImageBytes = 10 * 1024 * 1024
 
 // loadImages reads local image files and returns base64-encoded ImageContent slices.
 // Non-image files and files that fail to read are skipped with a warning log.
-func loadImages(paths []string) []providers.ImageContent {
-	if len(paths) == 0 {
+func loadImages(files []bus.MediaFile) []providers.ImageContent {
+	if len(files) == 0 {
 		return nil
 	}
 
 	var images []providers.ImageContent
-	for _, p := range paths {
-		mime := inferImageMime(p)
+	for _, f := range files {
+		mime := f.MimeType
 		if mime == "" {
+			mime = inferImageMime(f.Path)
+		}
+		if !strings.HasPrefix(mime, "image/") {
 			continue
 		}
 
-		data, err := os.ReadFile(p)
+		data, err := os.ReadFile(f.Path)
 		if err != nil {
-			slog.Warn("vision: failed to read image file", "path", p, "error", err)
+			slog.Warn("vision: failed to read image file", "path", f.Path, "error", err)
 			continue
 		}
 		if len(data) > maxImageBytes {
-			slog.Warn("vision: image file too large, skipping", "path", p, "size", len(data))
+			slog.Warn("vision: image file too large, skipping", "path", f.Path, "size", len(data))
 			continue
 		}
 
@@ -43,6 +47,121 @@ func loadImages(paths []string) []providers.ImageContent {
 		})
 	}
 	return images
+}
+
+// persistMedia sanitizes images, saves all media files to persistent storage,
+// and returns lightweight MediaRefs. Non-image files are saved as-is.
+// If mediaStore is nil, falls back to legacy behavior (no persistence, delete temp files).
+func (l *Loop) persistMedia(sessionKey string, files []bus.MediaFile) []providers.MediaRef {
+	if l.mediaStore == nil {
+		// Fallback: no persistent storage configured — delete temp files after loading.
+		slog.Warn("media: no media store configured, temp files will be deleted", "agent", l.id)
+		defer func() {
+			for _, f := range files {
+				_ = os.Remove(f.Path)
+			}
+		}()
+		return nil
+	}
+
+	var refs []providers.MediaRef
+	for _, f := range files {
+		mime := f.MimeType
+		if mime == "" {
+			mime = mimeFromExt(filepath.Ext(f.Path)) // fallback for legacy callers
+		}
+		kind := mediaKindFromMime(mime)
+
+		// Sanitize images before persistent storage.
+		srcPath := f.Path
+		if kind == "image" {
+			sanitized, err := SanitizeImage(f.Path)
+			if err != nil {
+				slog.Warn("media: sanitize image failed, using original", "path", f.Path, "error", err)
+			} else {
+				srcPath = sanitized
+				mime = "image/jpeg" // sanitized output is always JPEG
+				// Clean up original if sanitized to a different file.
+				if sanitized != f.Path {
+					_ = os.Remove(f.Path)
+				}
+			}
+		}
+
+		id, _, err := l.mediaStore.SaveFile(sessionKey, srcPath, mime)
+		if err != nil {
+			slog.Warn("media: failed to persist file", "path", f.Path, "error", err)
+			_ = os.Remove(srcPath)
+			continue
+		}
+
+		refs = append(refs, providers.MediaRef{
+			ID:       id,
+			MimeType: mime,
+			Kind:     kind,
+		})
+		slog.Debug("media: persisted file", "id", id, "kind", kind, "mime", mime, "agent", l.id)
+	}
+	return refs
+}
+
+// mediaKindFromMime returns the media kind ("image", "video", "audio", "document")
+// based on MIME type prefix.
+func mediaKindFromMime(mime string) string {
+	switch {
+	case strings.HasPrefix(mime, "image/"):
+		return "image"
+	case strings.HasPrefix(mime, "video/"):
+		return "video"
+	case strings.HasPrefix(mime, "audio/"):
+		return "audio"
+	default:
+		return "document"
+	}
+}
+
+// maxMediaReloadMessages is the default number of recent messages with image MediaRefs
+// to reload for LLM vision context.
+const maxMediaReloadMessages = 5
+
+// reloadMediaForMessages populates Images on historical messages that have image MediaRefs.
+// Only reloads the last maxMessages messages with image refs (newest first) to limit context usage.
+func (l *Loop) reloadMediaForMessages(msgs []providers.Message, maxMessages int) {
+	if l.mediaStore == nil || maxMessages <= 0 {
+		return
+	}
+
+	count := 0
+	for i := len(msgs) - 1; i >= 0 && count < maxMessages; i-- {
+		if len(msgs[i].MediaRefs) == 0 || len(msgs[i].Images) > 0 {
+			continue // skip if no refs or already loaded
+		}
+
+		hasImageRef := false
+		var imageFiles []bus.MediaFile
+		for _, ref := range msgs[i].MediaRefs {
+			if ref.Kind != "image" {
+				continue
+			}
+			hasImageRef = true
+			p, err := l.mediaStore.LoadPath(ref.ID)
+			if err != nil {
+				slog.Debug("media: reload skip missing file", "id", ref.ID, "error", err)
+				continue
+			}
+			imageFiles = append(imageFiles, bus.MediaFile{Path: p, MimeType: ref.MimeType})
+		}
+
+		if !hasImageRef {
+			continue
+		}
+		count++
+
+		if images := loadImages(imageFiles); len(images) > 0 {
+			msgs[i].Images = images
+			slog.Debug("media: reloaded images for historical message", "index", i, "count", len(images))
+		}
+	}
 }
 
 // inferImageMime returns the MIME type for supported image extensions, or "" if not an image.
