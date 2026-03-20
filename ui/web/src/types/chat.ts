@@ -29,6 +29,7 @@ export interface MediaItem {
   path: string;
   mimeType: string;
   fileName?: string;
+  size?: number;
   kind: "image" | "video" | "audio" | "document" | "code";
 }
 
@@ -65,6 +66,8 @@ export interface AgentEventPayload {
     // run.retrying event fields
     attempt?: number;
     maxAttempts?: number;
+    // run.completed media files
+    media?: { path: string; content_type?: string; size?: number }[];
   };
 }
 

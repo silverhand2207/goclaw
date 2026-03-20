@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { useClipboard } from "@/hooks/use-clipboard";
 import { useAuthStore } from "@/stores/use-auth-store";
+import { toFileUrl } from "@/lib/file-helpers";
 import { Check, Copy, Download, FileText } from "lucide-react";
 import { ImageLightbox } from "./image-lightbox";
 import {
@@ -63,27 +64,6 @@ function isFileLink(href: string | undefined): boolean {
   return false;
 }
 
-/** Convert a local file path to a /v1/files/ URL for serving.
- *  For relative paths, uses just the filename so the backend fallback search
- *  can find generated files regardless of the directory the LLM wrote. */
-function toFileUrl(href: string, token?: string): string {
-  let url: string;
-  if (href.startsWith("/v1/files/") || href.includes("/v1/files/")) {
-    url = href;
-  } else {
-    // For relative paths, use just the basename — the backend will search
-    // the workspace for the file by name (goclaw_gen_* names are unique).
-    const basename = href.split("/").pop() ?? href;
-    url = `/v1/files/${basename}`;
-  }
-  // Append auth token as query param (server accepts ?token= for file serving)
-  if (token) {
-    const sep = url.includes("?") ? "&" : "?";
-    url += `${sep}token=${encodeURIComponent(token)}`;
-  }
-  return url;
-}
-
 /** File type detection from name */
 function isMarkdownExt(name: string): boolean {
   return /\.(md|mdx|markdown)$/i.test(name);
@@ -124,7 +104,7 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
         return res.text();
       })
       .then((text) => setFilePreview({ name, href, content: text }))
-      .catch(() => window.open(href, "_blank"))
+      .catch(() => { /* fetch failed — file may not exist, ignore */ })
       .finally(() => setFileLoading(false));
   }, []);
 
@@ -185,15 +165,16 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
             );
           },
           img({ src, alt, ...props }) {
+            const resolvedSrc = isFileLink(src) ? toFileUrl(src!, token) : src;
             return (
               <img
-                src={src}
+                src={resolvedSrc}
                 alt={alt ?? "image"}
                 className="max-w-sm rounded-lg border shadow-sm cursor-pointer hover:opacity-90 transition-opacity"
                 loading="lazy"
                 onClick={(e) => {
                   e.preventDefault();
-                  if (src) openLightbox(src, alt ?? "image");
+                  if (resolvedSrc) openLightbox(resolvedSrc, alt ?? "image");
                 }}
                 {...props}
               />
@@ -247,13 +228,13 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
 
       <Dialog open={!!filePreview} onOpenChange={(open) => { if (!open) setFilePreview(null); }}>
         {filePreview && (
-          <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
-            <DialogHeader className="flex-row items-center justify-between gap-2">
-              <DialogTitle className="truncate text-base">{filePreview.name}</DialogTitle>
+          <DialogContent className="sm:max-w-4xl max-h-[85vh] flex flex-col">
+            <DialogHeader className="flex-row items-center gap-2 pr-10">
+              <DialogTitle className="truncate text-base flex-1">{filePreview.name}</DialogTitle>
               <a
                 href={filePreview.href}
                 download={filePreview.name}
-                className="mr-8 flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted"
+                className="flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted"
               >
                 <Download className="h-3.5 w-3.5" />
                 Download
