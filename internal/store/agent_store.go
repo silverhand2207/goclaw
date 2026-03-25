@@ -322,7 +322,7 @@ type AgentCRUDStore interface {
 	Update(ctx context.Context, id uuid.UUID, updates map[string]any) error
 	Delete(ctx context.Context, id uuid.UUID) error
 	List(ctx context.Context, ownerID string) ([]AgentData, error)
-	GetDefault(ctx context.Context) (*AgentData, error)
+	GetDefault(ctx context.Context) (*AgentData, error) // agent with is_default=true, or first available
 }
 
 // AgentAccessStore manages agent sharing and access control.
@@ -330,7 +330,7 @@ type AgentAccessStore interface {
 	ShareAgent(ctx context.Context, agentID uuid.UUID, userID, role, grantedBy string) error
 	RevokeShare(ctx context.Context, agentID uuid.UUID, userID string) error
 	ListShares(ctx context.Context, agentID uuid.UUID) ([]AgentShareData, error)
-	CanAccess(ctx context.Context, agentID uuid.UUID, userID string) (bool, string, error)
+	CanAccess(ctx context.Context, agentID uuid.UUID, userID string) (bool, string, error) // (allowed, role, err)
 	ListAccessible(ctx context.Context, userID string) ([]AgentData, error)
 }
 

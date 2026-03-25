@@ -89,6 +89,7 @@ type SessionListRichResult struct {
 // SessionCoreStore manages session lifecycle, messages, and history.
 type SessionCoreStore interface {
 	GetOrCreate(ctx context.Context, key string) *SessionData
+	// Get returns the session if it exists (cache or DB), nil otherwise. Never creates.
 	Get(ctx context.Context, key string) *SessionData
 	AddMessage(ctx context.Context, key string, msg providers.Message)
 	GetHistory(ctx context.Context, key string) []providers.Message
