@@ -34,6 +34,8 @@ export function useChatMessages(sessionKey: string, agentId: string) {
   const toolStreamRef = useRef<ToolStreamEntry[]>([]);
   const agentIdRef = useRef(agentId);
   agentIdRef.current = agentId;
+  const sessionKeyRef = useRef(sessionKey);
+  sessionKeyRef.current = sessionKey;
   const activityRef = useRef<RunActivity | null>(null);
   const blockRepliesRef = useRef<ChatMessage[]>([]);
   const rafPendingRef = useRef(false);
@@ -154,6 +156,15 @@ export function useChatMessages(sessionKey: string, agentId: string) {
     (payload: unknown) => {
       const event = payload as AgentEventPayload;
       if (!event) return;
+
+      // Only process events from WS channel targeting the active session.
+      // Delegations/announces (runKind set) are allowed regardless of channel.
+      if (event.channel && event.channel !== "ws" && !event.runKind) {
+        return;
+      }
+      if (event.sessionKey && event.sessionKey !== sessionKeyRef.current) {
+        return;
+      }
 
       // Capture run.started when we are expecting a run for this agent,
       // OR when an announce run starts (leader summarising team results).

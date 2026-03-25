@@ -160,10 +160,11 @@ type AgentEvent struct {
 	TeamTaskID    string `json:"teamTaskId,omitempty"`
 	ParentAgentID string `json:"parentAgentId,omitempty"`
 
-	// Routing context (helps WS clients filter by user/channel)
-	UserID  string `json:"userId,omitempty"`
-	Channel string `json:"channel,omitempty"`
-	ChatID  string `json:"chatId,omitempty"`
+	// Routing context (helps WS clients filter by user/channel/session)
+	UserID     string `json:"userId,omitempty"`
+	Channel    string `json:"channel,omitempty"`
+	ChatID     string `json:"chatId,omitempty"`
+	SessionKey string `json:"sessionKey,omitempty"`
 
 	// TenantID scopes this event to a specific tenant for filtering (not serialized).
 	TenantID uuid.UUID `json:"-"`
