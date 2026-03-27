@@ -8,10 +8,28 @@ import (
 
 	"log/slog"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
+
+// isUserFilePopulated checks if USER.md has been filled with actual user data
+// beyond the blank template. The template has "- **Name:**\n" with no value.
+func isUserFilePopulated(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return false
+	}
+	// Template markers: "**Name:**" followed by newline (no value) or just whitespace
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "- **Name:**" || line == "**Name:**" {
+			return false // name field still empty
+		}
+	}
+	return true
+}
 
 // finalizeRun performs post-loop processing: sanitization, media dedup, session flush,
 // bootstrap cleanup, and builds the final RunResult.
@@ -90,6 +108,7 @@ func (l *Loop) finalizeRun(
 			ID:       filepath.Base(mr.Path),
 			MimeType: mr.ContentType,
 			Kind:     kind,
+			Path:     mr.Path,
 		})
 	}
 	rs.pendingMsgs = append(rs.pendingMsgs, assistantMsg)
@@ -134,6 +153,7 @@ func (l *Loop) finalizeRun(
 	l.sessions.Save(ctx, req.SessionKey)
 
 	// Bootstrap auto-cleanup: after enough conversation turns, remove BOOTSTRAP.md.
+	// If USER.md is still the blank template, inject a reminder so the agent fills it.
 	if hadBootstrap && l.bootstrapCleanup != nil {
 		userTurns := 1 // current user message
 		for _, m := range history {
@@ -146,6 +166,19 @@ func (l *Loop) finalizeRun(
 				slog.Warn("bootstrap auto-cleanup failed", "error", cleanErr, "agent", l.id, "user", req.UserID)
 			} else {
 				slog.Info("bootstrap auto-cleanup completed", "agent", l.id, "user", req.UserID, "turns", userTurns)
+				// Check if USER.md is still the blank template — nudge agent to fill it
+				if l.contextFileLoader != nil {
+					files := l.contextFileLoader(ctx, l.agentUUID, req.UserID, l.agentType)
+					for _, f := range files {
+						if f.Path == bootstrap.UserFile && !isUserFilePopulated(f.Content) {
+							rs.pendingMsgs = append(rs.pendingMsgs, providers.Message{
+								Role:    "user",
+								Content: "[System] You completed onboarding but USER.md is still empty. Please update USER.md with the user's name and details from this conversation using write_file.",
+							})
+							break
+						}
+					}
+				}
 			}
 		}
 	}

@@ -12,11 +12,20 @@ import (
 	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/edition"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/safego"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
+
+// teamGuidance returns edition-specific system prompt guidance for team members.
+func teamGuidance(fullMode bool) string {
+	if fullMode {
+		return tools.FullTeamPolicy{}.MemberGuidance()
+	}
+	return tools.LiteTeamPolicy{}.MemberGuidance()
+}
 
 // filteredToolNames returns tool names after applying policy filters.
 // Used for system prompt so denied tools don't appear in ## Tooling section.
@@ -187,6 +196,7 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		HasTeam:                hasTeamTools,
 		TeamWorkspace:          tools.ToolTeamWorkspaceFromCtx(ctx),
 		TeamMembers:            teamMembers,
+		TeamGuidance:           teamGuidance(edition.Current().TeamFullMode),
 		HasSkillSearch:         hasSkillSearch,
 		HasSkillManage:         l.skillEvolve && hasSkillManage,
 		HasMCPToolSearch:       hasMCPToolSearch,

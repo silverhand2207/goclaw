@@ -21,6 +21,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/sandbox"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/edition"
 	"github.com/nextlevelbuilder/goclaw/internal/store/pg"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/internal/tracing"
@@ -177,7 +178,7 @@ func wireExtras(
 				if c, ok := m["content"].(string); ok && strings.Contains(c, "/v1/") {
 					m["content"] = httpapi.SignFileURLs(c, secret)
 				}
-				// Convert media local paths → signed /v1/files/basename?ft=hash
+				// Convert media local paths → signed /v1/files/{full_path}?ft=hash
 				if rawMedia, ok := m["media"].([]agent.MediaResult); ok {
 					// Clone slice — the original is shared with RunResult.Media;
 					// mutating in-place corrupts paths for downstream consumers
@@ -185,8 +186,10 @@ func wireExtras(
 					signed := make([]agent.MediaResult, len(rawMedia))
 					for i, mr := range rawMedia {
 						signed[i] = mr
-						basename := filepath.Base(mr.Path)
-						url := "/v1/files/" + basename
+						// Use full path so backend resolves directly via os.Stat,
+						// no findInWorkspace fallback needed.
+						urlPath := strings.TrimPrefix(filepath.Clean(mr.Path), "/")
+						url := "/v1/files/" + urlPath
 						ft := httpapi.SignFileToken(url, secret, httpapi.FileTokenTTL)
 						signed[i].Path = url + "?ft=" + ft
 					}
@@ -278,7 +281,7 @@ func wireExtras(
 				ms.SetMemoryStore(stores.Memory)
 			}
 		}
-		slog.Info("memory layering enabled (Postgres)")
+		slog.Info("memory layering enabled")
 	}
 
 	// Wire knowledge graph store on KG tool + hint in memory_search results
@@ -436,7 +439,11 @@ func wireExtras(
 	if stores.Teams != nil && stores.Agents != nil {
 		teamMgr := tools.NewTeamToolManager(stores.Teams, stores.Agents, msgBus, workspace)
 		postTurn = teamMgr
-		toolsReg.Register(tools.NewTeamTasksTool(teamMgr))
+		var teamPolicy tools.TeamActionPolicy = tools.FullTeamPolicy{}
+		if !edition.Current().TeamFullMode {
+			teamPolicy = tools.LiteTeamPolicy{}
+		}
+		toolsReg.Register(tools.NewTeamTasksTool(teamMgr, teamPolicy))
 		// Wire workspace interceptor into write_file so team workspace validation
 		// and event broadcasting happen transparently via existing file tools.
 		wsInterceptor := tools.NewWorkspaceInterceptor(teamMgr)

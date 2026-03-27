@@ -156,16 +156,19 @@ func (a *AgentData) ParseMemoryConfig() *config.MemoryConfig {
 }
 
 // ParseThinkingLevel extracts thinking_level from other_config JSONB.
-// Returns "" if not configured (meaning "off").
+// Returns "low" if not configured (default thinking mode).
 func (a *AgentData) ParseThinkingLevel() string {
 	if len(a.OtherConfig) == 0 {
-		return ""
+		return "low"
 	}
 	var cfg struct {
 		ThinkingLevel string `json:"thinking_level"`
 	}
 	if json.Unmarshal(a.OtherConfig, &cfg) != nil {
-		return ""
+		return "low"
+	}
+	if cfg.ThinkingLevel == "" {
+		return "low"
 	}
 	return cfg.ThinkingLevel
 }

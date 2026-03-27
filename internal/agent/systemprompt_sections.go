@@ -392,7 +392,8 @@ func buildTeamWorkspaceSection(teamWsPath string) []string {
 }
 
 // buildTeamMembersSection lists team members so the agent knows who to assign tasks to.
-func buildTeamMembersSection(members []store.TeamMemberData) []string {
+// teamGuidance is injected from TeamActionPolicy.MemberGuidance() — varies by edition.
+func buildTeamMembersSection(members []store.TeamMemberData, teamGuidance string) []string {
 	lines := []string{
 		"## Team Members",
 		"",
@@ -413,7 +414,10 @@ func buildTeamMembersSection(members []store.TeamMemberData) []string {
 		"",
 		"When creating tasks with team_tasks, set assignee to the agent_key of the best-suited member.",
 		"Do NOT invent agent keys — only use the keys listed above.",
-		"",
 	)
+	if teamGuidance != "" {
+		lines = append(lines, teamGuidance)
+	}
+	lines = append(lines, "")
 	return lines
 }

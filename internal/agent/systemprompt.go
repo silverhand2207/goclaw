@@ -37,6 +37,7 @@ type SystemPromptConfig struct {
 	HasTeam        bool                   // agent belongs to a team? (skips generic spawn section)
 	TeamWorkspace  string                 // absolute path to team shared workspace (empty if not in team)
 	TeamMembers    []store.TeamMemberData // team member roster for task assignment
+	TeamGuidance   string                 // edition-specific guidance from TeamActionPolicy.MemberGuidance()
 	ContextFiles  []bootstrap.ContextFile // bootstrap files for # Project Context
 	ExtraPrompt   string                 // extra system prompt (subagent context, etc.)
 	AgentType     string                 // "open" or "predefined" — affects context file framing
@@ -228,7 +229,7 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 
 	// 6.4. ## Team Members — inject roster so agent knows who to assign tasks to
 	if !cfg.IsBootstrap && len(cfg.TeamMembers) > 0 {
-		lines = append(lines, buildTeamMembersSection(cfg.TeamMembers)...)
+		lines = append(lines, buildTeamMembersSection(cfg.TeamMembers, cfg.TeamGuidance)...)
 	}
 
 	// 6.5 ## Sandbox (matching TS sandboxInfo section) — skip during bootstrap

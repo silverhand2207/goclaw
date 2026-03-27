@@ -25,6 +25,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/channels/zalo"
 	zalopersonal "github.com/nextlevelbuilder/goclaw/internal/channels/zalo/personal"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/edition"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	"github.com/nextlevelbuilder/goclaw/internal/heartbeat"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway/methods"
@@ -75,6 +76,21 @@ func runGateway() {
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
+	}
+
+	// Edition override: explicit GOCLAW_EDITION takes precedence over auto-detection.
+	// Auto-detection happens later in setupStoresAndTracing (sqlite → lite).
+	if edName := os.Getenv("GOCLAW_EDITION"); edName != "" {
+		switch edName {
+		case "lite":
+			edition.SetCurrent(edition.Lite)
+			slog.Info("edition: lite (explicit)")
+		case "standard":
+			edition.SetCurrent(edition.Standard)
+			slog.Info("edition: standard (explicit)")
+		default:
+			slog.Warn("unknown GOCLAW_EDITION, using standard", "value", edName)
+		}
 	}
 
 	// Create core components
@@ -432,6 +448,9 @@ func runGateway() {
 	// API key management
 	// API documentation (OpenAPI spec + Swagger UI at /docs)
 	server.SetDocsHandler(httpapi.NewDocsHandler())
+
+	// Edition info (public, no auth — used by desktop UI comparison modal)
+	server.SetEditionHandler(httpapi.NewEditionHandler())
 
 	if pgStores != nil && pgStores.APIKeys != nil {
 		server.SetAPIKeysHandler(httpapi.NewAPIKeysHandler(pgStores.APIKeys, msgBus))
