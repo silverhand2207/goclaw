@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
 export type AppView = 'chat' | 'settings' | 'team-board'
-export type SettingsTab = 'appearance' | 'providers' | 'agents' | 'mcp' | 'skills' | 'tools' | 'cron' | 'traces' | 'about'
+export type SettingsTab = 'appearance' | 'providers' | 'agents' | 'mcp' | 'skills' | 'tools' | 'cron' | 'traces' | 'storage' | 'about'
 
 interface UiState {
   theme: 'dark' | 'light'

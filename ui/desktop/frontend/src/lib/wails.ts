@@ -42,4 +42,5 @@ export const wails = {
   restartApp: (): Promise<void> => window.go.main.App.RestartApp(),
   openFile: (path: string): Promise<void> => window.go.main.App.OpenFile(path),
   saveFile: (srcPath: string): Promise<void> => window.go.main.App.SaveFile(srcPath),
+  downloadURL: (url: string, filename: string): Promise<void> => window.go.main.App.DownloadURL(url, filename),
 }

@@ -2,7 +2,7 @@ import { useTranslation } from 'react-i18next'
 import type { SettingsTab } from '../../stores/ui-store'
 
 const TAB_KEYS: SettingsTab[] = [
-  'appearance', 'providers', 'agents', 'mcp', 'skills', 'tools', 'cron', 'traces', 'about',
+  'appearance', 'providers', 'agents', 'mcp', 'skills', 'tools', 'cron', 'traces', 'storage', 'about',
 ]
 
 interface SettingsTabBarProps {
