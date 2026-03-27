@@ -32,7 +32,7 @@ export const useUiStore = create<UiState>()(
   persist(
     (set) => ({
       theme: 'light',
-      locale: 'en',
+      locale: 'vi',
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       sidebarOpen: true,
       sidebarWidth: 260,

@@ -60,7 +60,7 @@ function getInitialLanguage(): string {
   const lang = navigator.language.toLowerCase()
   if (lang.startsWith('vi')) return 'vi'
   if (lang.startsWith('zh')) return 'zh'
-  return 'en'
+  return 'vi'
 }
 
 i18n.use(initReactI18next).init({
