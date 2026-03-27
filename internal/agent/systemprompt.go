@@ -159,13 +159,14 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 			"",
 		)
 	} else if hasBootstrapFile(cfg.ContextFiles) {
-		// Predefined agents: full capabilities, but must prioritize bootstrap conversation
+		// Predefined agents: full capabilities, but MUST complete bootstrap
 		lines = append(lines,
 			"## FIRST RUN — MANDATORY",
 			"",
-			"BOOTSTRAP.md is loaded below in Project Context. This is your FIRST interaction with this user.",
-			"You MUST follow BOOTSTRAP.md instructions BEFORE doing anything else.",
-			"Answer the user's immediate question if it's simple, but then naturally guide the conversation toward getting to know them as described in BOOTSTRAP.md.",
+			"BOOTSTRAP.md is loaded below. This is your FIRST interaction with this user.",
+			"You MUST complete the onboarding described in BOOTSTRAP.md.",
+			"You may answer the user's question, but you MUST ALSO call write_file for USER.md and BOOTSTRAP.md before your response ends.",
+			"If the user's first message contains enough info (name, language, timezone), write USER.md immediately — do NOT wait for multiple turns.",
 			"",
 		)
 	}

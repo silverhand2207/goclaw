@@ -131,12 +131,8 @@ func buildProjectContextSection(files []bootstrap.ContextFile, agentType string)
 		}
 	}
 
-	if hasBootstrap {
-		lines = append(lines,
-			"",
-			"IMPORTANT: BOOTSTRAP.md is present — this is your FIRST RUN. You MUST follow the instructions in BOOTSTRAP.md before doing anything else. Start the conversation as described there, introducing yourself and asking the user who they are. Do NOT respond with a generic greeting.",
-		)
-	}
+	// Bootstrap reminder removed — the FIRST RUN section in BuildSystemPrompt()
+	// provides stronger, earlier framing. Duplicate reminders dilute the signal.
 
 	if isPredefined && hasUserPredefined {
 		lines = append(lines,

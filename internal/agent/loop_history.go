@@ -122,10 +122,15 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		}
 	}
 
-	// Bootstrap mode: group chats and team-dispatched sessions skip onboarding entirely;
-	// only DMs enter minimal bootstrap mode.
-	if hadBootstrap && (peerKind == "group" || bootstrap.IsTeamSession(sessionKey)) {
-		// Filter BOOTSTRAP.md from context files — groups/team tasks don't need onboarding.
+	// Bootstrap mode: only direct user DMs need onboarding.
+	// System sessions (group, team, subagent, cron, heartbeat) skip bootstrap
+	// to prevent the model from getting distracted by onboarding instructions.
+	isSystemSession := peerKind == "group" ||
+		bootstrap.IsTeamSession(sessionKey) ||
+		bootstrap.IsSubagentSession(sessionKey) ||
+		bootstrap.IsCronSession(sessionKey) ||
+		bootstrap.IsHeartbeatSession(sessionKey)
+	if hadBootstrap && isSystemSession {
 		filtered := make([]bootstrap.ContextFile, 0, len(contextFiles))
 		for _, cf := range contextFiles {
 			if cf.Path != bootstrap.BootstrapFile {
