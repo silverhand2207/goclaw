@@ -181,6 +181,7 @@ func isAdminMethod(method string) bool {
 		protocol.MethodAPIKeysCreate,
 		protocol.MethodAPIKeysRevoke,
 		protocol.MethodSkillsUpdate,
+		protocol.MethodAgentsFileSet,
 	}
 	return slices.Contains(adminMethods, method)
 }
