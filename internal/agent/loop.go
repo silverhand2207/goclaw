@@ -262,13 +262,23 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (result *RunResult, 
 		if tid := store.TenantIDFromContext(ctx); tid != uuid.Nil {
 			chatReq.Options[providers.OptTenantID] = tid.String()
 		}
-		if l.thinkingLevel != "" && l.thinkingLevel != "off" {
-			if tc, ok := provider.(providers.ThinkingCapable); ok && tc.SupportsThinking() {
-				chatReq.Options[providers.OptThinkingLevel] = l.thinkingLevel
-			} else {
-				slog.Debug("thinking_level ignored: provider does not support thinking",
-					"provider", provider.Name(), "level", l.thinkingLevel)
-			}
+		reasoningDecision := providers.ResolveReasoningDecision(
+			provider,
+			model,
+			l.reasoningConfig.Effort,
+			l.reasoningConfig.Fallback,
+			l.reasoningConfig.Source,
+		)
+		if effort := reasoningDecision.RequestEffort(); effort != "" {
+			chatReq.Options[providers.OptThinkingLevel] = effort
+		}
+		if reasoningDecision.Reason != "" {
+			slog.Debug("reasoning normalized",
+				"provider", provider.Name(),
+				"model", model,
+				"requested", reasoningDecision.RequestedEffort,
+				"effective", reasoningDecision.EffectiveEffort,
+				"reason", reasoningDecision.Reason)
 		}
 
 		// Call LLM (streaming or non-streaming)
@@ -276,6 +286,9 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (result *RunResult, 
 		var err error
 
 		callCtx := providers.WithChatGPTOAuthRoutingObservation(ctx, providers.NewChatGPTOAuthRoutingObservation())
+		if reasoningDecision.HasObservation() {
+			callCtx = providers.WithReasoningDecision(callCtx, reasoningDecision)
+		}
 		llmSpanStart := time.Now().UTC()
 		llmSpanID := l.emitLLMSpanStart(callCtx, llmSpanStart, rs.iteration, messages)
 
@@ -362,8 +375,8 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (result *RunResult, 
 			}
 
 			// Phase 1: Prune old tool results before resorting to full compaction (at 70% of budget).
-			if historyTokens >= int(float64(historyBudget)*0.7) && !rs.midLoopPruned {
-				rs.midLoopPruned = true
+			// Re-triggers each iteration — new tool results may have grown context since last prune.
+			if historyTokens >= int(float64(historyBudget)*0.7) {
 				pruned := pruneContextMessages(messages, l.contextWindow, l.contextPruningCfg)
 				if len(pruned) > 0 {
 					messages = pruned
@@ -397,20 +410,42 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (result *RunResult, 
 			}
 		}
 
-		// Output truncated (max_tokens hit). Tool call args are likely incomplete.
+		// Output truncated (max_tokens hit) or tool call args malformed.
 		// Inject a system hint so the model can retry with shorter output.
-		if resp.FinishReason == "length" && len(resp.ToolCalls) > 0 {
-			slog.Warn("output truncated (max_tokens), tool calls may have incomplete args",
-				"agent", l.id, "iteration", rs.iteration, "max_tokens", l.effectiveMaxTokens())
+		// Cap consecutive truncation retries to avoid burning through all iterations.
+		truncated := resp.FinishReason == "length" && len(resp.ToolCalls) > 0
+		parseErr := !truncated && hasParseErrors(resp.ToolCalls)
+		if truncated || parseErr {
+			rs.truncationRetries++
+			reason := "output truncated (max_tokens)"
+			if parseErr {
+				reason = "tool call arguments malformed (likely truncated)"
+			}
+			slog.Warn(reason, "agent", l.id, "iteration", rs.iteration,
+				"truncation_retry", rs.truncationRetries, "max_tokens", l.effectiveMaxTokens())
+
+			if rs.truncationRetries >= maxTruncationRetries {
+				slog.Warn("truncation retry limit reached, giving up",
+					"agent", l.id, "retries", rs.truncationRetries)
+				rs.finalContent = resp.Content
+				if rs.finalContent == "" {
+					rs.finalContent = "[Unable to complete: output repeatedly exceeded max_tokens. Try a simpler request or increase the token limit.]"
+				}
+				break
+			}
+
+			hint := "[System] Your output was truncated because it exceeded max_tokens. Your tool call arguments were incomplete. Please retry with shorter content — split large writes into multiple smaller calls, or reduce the amount of text."
+			if parseErr {
+				hint = "[System] One or more tool call arguments were malformed (truncated JSON). This usually means your output was too long. Please retry with shorter content — split large writes into multiple smaller calls."
+			}
 			messages = append(messages,
 				providers.Message{Role: "assistant", Content: resp.Content},
-				providers.Message{
-					Role:    "user",
-					Content: "[System] Your output was truncated because it exceeded max_tokens. Your tool call arguments were incomplete. Please retry with shorter content — split large writes into multiple smaller calls, or reduce the amount of text.",
-				},
+				providers.Message{Role: "user", Content: hint},
 			)
 			continue
 		}
+		// Reset truncation counter on successful tool call (model recovered).
+		rs.truncationRetries = 0
 
 		// No tool calls — exit or drain injected follow-ups.
 		if len(resp.ToolCalls) == 0 {
@@ -731,6 +766,21 @@ func (l *Loop) resolveToolCallName(name string) string {
 		return tools.StripToolPrefix(l.agentToolPolicy.ToolCallPrefix, name)
 	}
 	return name
+}
+
+// maxTruncationRetries caps consecutive truncation/parse-error retries.
+// After this many retries the loop gives up rather than burning all iterations.
+const maxTruncationRetries = 3
+
+// hasParseErrors returns true if any tool call has a non-empty ParseError,
+// indicating the arguments JSON was malformed or truncated by the provider.
+func hasParseErrors(calls []providers.ToolCall) bool {
+	for _, tc := range calls {
+		if tc.ParseError != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func truncateToolArgs(args map[string]any, maxLen int) map[string]any {

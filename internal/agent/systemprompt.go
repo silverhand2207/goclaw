@@ -3,12 +3,28 @@ package agent
 import (
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
+
+// providerTypeOf extracts the DB provider_type (e.g. "chatgpt_oauth", "codex")
+// from a Provider. Falls back to Name() if the provider doesn't expose ProviderType().
+func providerTypeOf(p providers.Provider) string {
+	type providerTyper interface {
+		ProviderType() string
+	}
+	if pt, ok := p.(providerTyper); ok {
+		if t := pt.ProviderType(); t != "" {
+			return t
+		}
+	}
+	return p.Name()
+}
 
 // PromptMode controls which system prompt sections are included.
 // Matches TS PromptMode type in system-prompt.ts.
@@ -53,6 +69,10 @@ type SystemPromptConfig struct {
 	SandboxEnabled       bool   // exec tool runs inside Docker sandbox?
 	SandboxContainerDir  string // container-side workdir (e.g. "/workspace")
 	SandboxWorkspaceAccess string // "none", "ro", "rw"
+
+	// ProviderType identifies the LLM provider (e.g. "openai", "anthropic", "codex").
+	// Used for provider-specific prompt adjustments (e.g. SOUL echo for GPT models).
+	ProviderType string
 
 	// Self-evolution: predefined agents can update SOUL.md (style/tone)
 	SelfEvolve bool
@@ -110,20 +130,9 @@ var coreToolSummaries = map[string]string{
 	"list_group_members":      "List all members of the current group chat (Feishu/Lark only)",
 	"create_forum_topic":      "Create a forum topic in a Telegram supergroup",
 
-	// Legacy tool aliases — kept for backward compatibility with older clients
-	"edit_file":      "Alias for edit — Edit a file by replacing exact text matches",
-	"sessions_spawn": "Alias for spawn — Spawn a self-clone subagent to handle a task in the background",
-
-	// Claude Code tool aliases — enable Claude Code skills without modification
-	"Read":       "Alias for read_file — Read file contents",
-	"Write":      "Alias for write_file — Create or overwrite files",
-	"Edit":       "Alias for edit — Edit a file by replacing exact text matches",
-	"Bash":       "Alias for exec — Run shell commands",
-	"WebFetch":   "Alias for web_fetch — Fetch and extract content from a URL",
-	"WebSearch":  "Alias for web_search — Search the web",
-	"Agent":      "Alias for spawn — Spawn a subagent or delegate to another agent",
-	"Skill":      "Alias for use_skill — Invoke a skill by name",
-	"ToolSearch": "Alias for mcp_tool_search — Search for available MCP tools",
+	// Tool aliases (edit_file, sessions_spawn, Read, Write, Edit, Bash, etc.)
+	// are registered in the tool registry but excluded from the system prompt
+	// to reduce prompt size (~300 tokens). They work without being listed here.
 }
 
 // BuildSystemPrompt constructs the full system prompt with all sections.
@@ -203,6 +212,11 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 	// 2. ## Tooling
 	lines = append(lines, buildToolingSection(cfg.ToolNames, cfg.SandboxEnabled, cfg.ShellDenyGroups)...)
 
+	// 2.3. ## Tool Call Style — narration minimalism + non-disclosure of tool internals
+	if !cfg.IsBootstrap {
+		lines = append(lines, buildToolCallStyleSection()...)
+	}
+
 	// 2.5. Credentialed CLI context (appended after tooling, before safety) — skip during bootstrap
 	if !cfg.IsBootstrap && cfg.CredentialCLIContext != "" {
 		lines = append(lines, cfg.CredentialCLIContext, "")
@@ -235,10 +249,11 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 
 	// 4.5. ## MCP Tools (full only) — skip during bootstrap
 	if !isMinimal && !cfg.IsBootstrap {
+		if len(cfg.MCPToolDescs) > 0 {
+			lines = append(lines, buildMCPToolsInlineSection(cfg.MCPToolDescs)...)
+		}
 		if cfg.HasMCPToolSearch {
 			lines = append(lines, buildMCPToolsSearchSection()...)
-		} else if len(cfg.MCPToolDescs) > 0 {
-			lines = append(lines, buildMCPToolsInlineSection(cfg.MCPToolDescs)...)
 		}
 	}
 
@@ -292,6 +307,12 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 		lines = append(lines, buildProjectContextSection(otherFiles, cfg.AgentType)...)
 	}
 
+	// 12.5. ## Memory Recall — dedicated section (supplements recency reminder at end)
+	if !isMinimal && cfg.HasMemory {
+		hasMemoryGet := slices.Contains(cfg.ToolNames, "memory_get")
+		lines = append(lines, buildMemoryRecallSection(hasMemoryGet, cfg.HasKnowledgeGraph)...)
+	}
+
 	// 13. ## Sub-Agent Spawning — skipped for team agents and bootstrap
 	if !cfg.IsBootstrap && cfg.HasSpawn && !cfg.HasTeam {
 		lines = append(lines, buildSpawnSection()...)
@@ -301,19 +322,14 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 	lines = append(lines, buildRuntimeSection(cfg)...)
 
 	// 16. Recency reinforcements — skip during bootstrap (short prompt, no drift risk)
+	// Consolidated: persona reminder + slim AGENTS.md reminder (no memory duplication).
+	// Memory recall is covered by the dedicated ## Memory Recall section above.
 	if !cfg.IsBootstrap {
 		if len(personaFiles) > 0 {
-			lines = append(lines, buildPersonaReminder(personaFiles, cfg.AgentType)...)
+			lines = append(lines, buildPersonaReminder(personaFiles, cfg.AgentType, cfg.ProviderType)...)
 		}
 		if !isMinimal {
-			lines = append(lines, "Reminder: Follow AGENTS.md rules — memory recall before answering, NO_REPLY when silent, match the user's language.", "")
-		}
-		if !isMinimal && cfg.HasMemory {
-			memReminder := "Reminder: Before answering questions about prior work, decisions, or preferences, always run memory_search first."
-			if cfg.HasKnowledgeGraph {
-				memReminder += " Also run knowledge_graph_search when the question involves people, teams, projects, or connections — it finds relationship paths that memory_search misses."
-			}
-			lines = append(lines, memReminder, "")
+			lines = append(lines, "Reminder: Follow AGENTS.md rules — NO_REPLY when silent, match the user's language.", "")
 		}
 	}
 
@@ -387,7 +403,7 @@ func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups ma
 			"",
 			"### Media Files",
 			"When users send images, videos, audio, or documents, you see tags like:",
-			`  <media:image id="..." path="...">`,
+			`  <media:image id="..." path="..." url="...">`,
 			`  <media:video id="...">, <media:audio id="...">, <media:document path="...">`,
 			"Use the corresponding read_* tool (with the path or media_id) to analyze them when the user asks about them or when understanding the media is needed to answer.",
 			"You have full vision/audio/video capabilities through these tools.",
