@@ -410,6 +410,27 @@ func TestSanitizeHistory_NoMergeForToolCallMessages(t *testing.T) {
 	}
 }
 
+func TestSanitizeHistory_MergePreservesMediaRefs(t *testing.T) {
+	msgs := []providers.Message{
+		{Role: "user", Content: "here's a photo", MediaRefs: []providers.MediaRef{{Kind: "image", ID: "f1"}}},
+		{Role: "user", Content: "and another", MediaRefs: []providers.MediaRef{{Kind: "image", ID: "f2"}}},
+		{Role: "assistant", Content: "nice pics"},
+	}
+	got, dropped := sanitizeHistory(msgs)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 messages after merge, got %d", len(got))
+	}
+	if len(got[0].MediaRefs) != 2 {
+		t.Errorf("expected 2 media refs after merge, got %d", len(got[0].MediaRefs))
+	}
+	if got[0].MediaRefs[0].ID != "f1" || got[0].MediaRefs[1].ID != "f2" {
+		t.Errorf("media refs not preserved correctly: %+v", got[0].MediaRefs)
+	}
+	if dropped != 1 {
+		t.Errorf("expected 1 dropped, got %d", dropped)
+	}
+}
+
 func TestUniquifyToolCallIDs(t *testing.T) {
 	runID := "abcdef12-3456-7890-abcd-ef1234567890"
 

@@ -601,6 +601,11 @@ func sanitizeHistory(msgs []providers.Message) ([]providers.Message, int) {
 				slog.Debug("sanitizeHistory: merging consecutive same-role messages",
 					"role", curr.Role, "index", j)
 				prev.Content += "\n\n" + curr.Content
+				// Preserve media refs from merged message so compaction
+				// summary retains knowledge of shared media files.
+				if len(curr.MediaRefs) > 0 {
+					prev.MediaRefs = append(prev.MediaRefs, curr.MediaRefs...)
+				}
 				dropped++
 			} else {
 				merged = append(merged, curr)
