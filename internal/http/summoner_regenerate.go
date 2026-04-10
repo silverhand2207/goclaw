@@ -24,7 +24,7 @@ func (s *AgentSummoner) RegenerateAgent(agentID uuid.UUID, tenantID uuid.UUID, p
 	ctx, cancel := context.WithTimeout(store.WithTenantID(context.Background(), tenantID), 300*time.Second)
 	defer cancel()
 
-	s.ensureUserPredefined(ctx, agentID)
+	s.ensureBackfillFiles(ctx, agentID)
 
 	s.emitEvent(agentID, tenantID, SummonEventStarted, "", "")
 
@@ -56,7 +56,19 @@ func (s *AgentSummoner) RegenerateAgent(agentID uuid.UUID, tenantID uuid.UUID, p
 		updates["frontmatter"] = fm
 	}
 	if name := extractIdentityName(files[bootstrap.IdentityFile]); name != "" {
-		updates["display_name"] = name
+		agent, _ := s.agents.GetByID(ctx, agentID)
+		if agent != nil && agent.DisplayName != "" {
+			// User already set a custom name — preserve it, sync IDENTITY.md to match
+			if name != agent.DisplayName {
+				updated := bootstrap.UpdateIdentityField(files[bootstrap.IdentityFile], "Name", agent.DisplayName)
+				if updated != files[bootstrap.IdentityFile] {
+					_ = s.agents.SetAgentContextFile(ctx, agentID, bootstrap.IdentityFile, updated)
+				}
+			}
+		} else {
+			// No custom name — use LLM-generated name
+			updates["display_name"] = name
+		}
 	}
 	if len(updates) > 0 {
 		if err := s.agents.Update(ctx, agentID, updates); err != nil {
@@ -174,20 +186,29 @@ func (s *AgentSummoner) resolveProvider(ctx context.Context, name string) (provi
 	return provider, nil
 }
 
-// ensureUserPredefined seeds USER_PREDEFINED.md template if it doesn't exist yet.
-// Backfills agents created before this feature was added.
-func (s *AgentSummoner) ensureUserPredefined(ctx context.Context, agentID uuid.UUID) {
+// ensureBackfillFiles seeds template files that may be missing for agents created
+// before these features were introduced. Single DB query for all backfill checks.
+func (s *AgentSummoner) ensureBackfillFiles(ctx context.Context, agentID uuid.UUID) {
 	existing, err := s.agents.GetAgentContextFiles(ctx, agentID)
 	if err != nil {
 		return
 	}
+	has := make(map[string]bool, len(existing))
 	for _, f := range existing {
-		if f.FileName == bootstrap.UserPredefinedFile {
-			return // already exists
-		}
+		has[f.FileName] = true
 	}
-	if tpl, err := bootstrap.ReadTemplate(bootstrap.UserPredefinedFile); err == nil {
-		_ = s.agents.SetAgentContextFile(ctx, agentID, bootstrap.UserPredefinedFile, tpl)
+	backfill := []string{bootstrap.UserPredefinedFile, bootstrap.CapabilitiesFile}
+	for _, name := range backfill {
+		if has[name] {
+			continue
+		}
+		tpl, err := bootstrap.ReadTemplate(name)
+		if err != nil {
+			continue
+		}
+		if err := s.agents.SetAgentContextFile(ctx, agentID, name, tpl); err != nil {
+			slog.Warn("summoning: backfill file seed failed", "file", name, "agent", agentID, "error", err)
+		}
 	}
 }
 

@@ -51,7 +51,16 @@ func (s *PGMemoryStore) GetDocument(ctx context.Context, agentID, userID, path s
 	var content string
 
 	var err error
-	if userID == "" {
+	if store.IsSharedMemory(ctx) {
+		// Shared: no user_id filter
+		tc, tcArgs, _, tcErr := scopeClause(ctx, 3)
+		if tcErr != nil {
+			return "", tcErr
+		}
+		err = s.db.QueryRowContext(ctx,
+			"SELECT content FROM memory_documents WHERE agent_id = $1 AND path = $2"+tc+" ORDER BY updated_at DESC LIMIT 1",
+			append([]any{aid, path}, tcArgs...)...).Scan(&content)
+	} else if userID == "" {
 		tc, tcArgs, _, tcErr := scopeClause(ctx, 3)
 		if tcErr != nil {
 			return "", tcErr
@@ -100,7 +109,16 @@ func (s *PGMemoryStore) DeleteDocument(ctx context.Context, agentID, userID, pat
 	aid := mustParseUUID(agentID)
 	var res sql.Result
 	var err error
-	if userID == "" {
+	if store.IsSharedMemory(ctx) {
+		// Shared: delete any matching doc regardless of user_id
+		tc, tcArgs, _, tcErr := scopeClause(ctx, 3)
+		if tcErr != nil {
+			return tcErr
+		}
+		res, err = s.db.ExecContext(ctx,
+			"DELETE FROM memory_documents WHERE agent_id = $1 AND path = $2"+tc,
+			append([]any{aid, path}, tcArgs...)...)
+	} else if userID == "" {
 		tc, tcArgs, _, tcErr := scopeClause(ctx, 3)
 		if tcErr != nil {
 			return tcErr
@@ -130,47 +148,39 @@ func (s *PGMemoryStore) DeleteDocument(ctx context.Context, agentID, userID, pat
 func (s *PGMemoryStore) ListDocuments(ctx context.Context, agentID, userID string) ([]store.DocumentInfo, error) {
 	aid := mustParseUUID(agentID)
 
-	var rows *sql.Rows
-	var err error
-	if userID == "" {
+	var q string
+	var args []any
+	if store.IsSharedMemory(ctx) {
+		// Shared: list ALL docs for agent (global + per-user from all users)
 		tc, tcArgs, _, tcErr := scopeClause(ctx, 2)
 		if tcErr != nil {
 			return nil, tcErr
 		}
-		rows, err = s.db.QueryContext(ctx,
-			"SELECT path, hash, user_id, updated_at FROM memory_documents WHERE agent_id = $1 AND user_id IS NULL"+tc,
-			append([]any{aid}, tcArgs...)...)
+		q = "SELECT path, hash, user_id, updated_at FROM memory_documents WHERE agent_id = $1" + tc
+		args = append([]any{aid}, tcArgs...)
+	} else if userID == "" {
+		tc, tcArgs, _, tcErr := scopeClause(ctx, 2)
+		if tcErr != nil {
+			return nil, tcErr
+		}
+		q = "SELECT path, hash, user_id, updated_at FROM memory_documents WHERE agent_id = $1 AND user_id IS NULL" + tc
+		args = append([]any{aid}, tcArgs...)
 	} else {
 		tc, tcArgs, _, tcErr := scopeClause(ctx, 3)
 		if tcErr != nil {
 			return nil, tcErr
 		}
-		rows, err = s.db.QueryContext(ctx,
-			"SELECT path, hash, user_id, updated_at FROM memory_documents WHERE agent_id = $1 AND (user_id IS NULL OR user_id = $2)"+tc,
-			append([]any{aid, userID}, tcArgs...)...)
+		q = "SELECT path, hash, user_id, updated_at FROM memory_documents WHERE agent_id = $1 AND (user_id IS NULL OR user_id = $2)" + tc
+		args = append([]any{aid, userID}, tcArgs...)
 	}
-	if err != nil {
+
+	var rows []documentInfoRow
+	if err := pkgSqlxDB.SelectContext(ctx, &rows, q, args...); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var result []store.DocumentInfo
-	for rows.Next() {
-		var path, hash string
-		var uid *string
-		var updatedAt time.Time
-		if err := rows.Scan(&path, &hash, &uid, &updatedAt); err != nil {
-			continue
-		}
-		info := store.DocumentInfo{
-			Path:      path,
-			Hash:      hash,
-			UpdatedAt: updatedAt.UnixMilli(),
-		}
-		if uid != nil {
-			info.UserID = *uid
-		}
-		result = append(result, info)
+	result := make([]store.DocumentInfo, len(rows))
+	for i := range rows {
+		result[i] = rows[i].toDocumentInfo()
 	}
 	return result, nil
 }
@@ -187,7 +197,16 @@ func (s *PGMemoryStore) IndexDocument(ctx context.Context, agentID, userID, path
 
 	// Get document ID
 	var docID uuid.UUID
-	if userID == "" {
+	if store.IsSharedMemory(ctx) {
+		// Shared: no user_id filter
+		tc, tcArgs, _, tcErr := scopeClause(ctx, 3)
+		if tcErr != nil {
+			return tcErr
+		}
+		err = s.db.QueryRowContext(ctx,
+			"SELECT id FROM memory_documents WHERE agent_id = $1 AND path = $2"+tc+" ORDER BY updated_at DESC LIMIT 1",
+			append([]any{aid, path}, tcArgs...)...).Scan(&docID)
+	} else if userID == "" {
 		tc, tcArgs, _, tcErr := scopeClause(ctx, 3)
 		if tcErr != nil {
 			return tcErr
@@ -395,25 +414,15 @@ func (s *PGMemoryStore) BackfillEmbeddings(ctx context.Context) (int, error) {
 	total := 0
 
 	for {
-		rows, err := s.db.QueryContext(ctx,
-			"SELECT id, text FROM memory_chunks WHERE embedding IS NULL ORDER BY id ASC LIMIT $1", batchSize)
-		if err != nil {
+		type backfillRow struct {
+			ID   uuid.UUID `db:"id"`
+			Text string    `db:"text"`
+		}
+		var chunks []backfillRow
+		if err := pkgSqlxDB.SelectContext(ctx, &chunks,
+			"SELECT id, text FROM memory_chunks WHERE embedding IS NULL ORDER BY id ASC LIMIT $1", batchSize); err != nil {
 			return total, fmt.Errorf("query chunks without embeddings: %w", err)
 		}
-
-		type chunkRow struct {
-			ID   uuid.UUID
-			Text string
-		}
-		var chunks []chunkRow
-		for rows.Next() {
-			var c chunkRow
-			if err := rows.Scan(&c.ID, &c.Text); err != nil {
-				continue
-			}
-			chunks = append(chunks, c)
-		}
-		rows.Close()
 
 		if len(chunks) == 0 {
 			break

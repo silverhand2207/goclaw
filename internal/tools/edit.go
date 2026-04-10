@@ -14,14 +14,17 @@ import (
 // EditTool performs search-and-replace edits on files.
 // Supports context file interceptor and sandbox routing.
 type EditTool struct {
-	workspace        string
-	restrict         bool
-	deniedPrefixes   []string // path prefixes to deny access to (e.g. .goclaw)
-	sandboxMgr       sandbox.Manager
-	contextFileIntc  *ContextFileInterceptor
-	memIntc          *MemoryInterceptor
-	permStore store.ConfigPermissionStore // nil = no group write restriction
+	workspace       string
+	restrict        bool
+	deniedPrefixes  []string // path prefixes to deny access to (e.g. .goclaw)
+	sandboxMgr      sandbox.Manager
+	contextFileIntc *ContextFileInterceptor
+	memIntc         *MemoryInterceptor
+	vaultIntc       *VaultInterceptor
+	permStore       store.ConfigPermissionStore // nil = no group write restriction
 }
+
+func (t *EditTool) SetVaultInterceptor(v *VaultInterceptor) { t.vaultIntc = v }
 
 // DenyPaths adds path prefixes that edit must reject.
 func (t *EditTool) DenyPaths(prefixes ...string) {
@@ -188,6 +191,10 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) *Result {
 		return ErrorResult(fmt.Sprintf("failed to write file: %v", err))
 	}
 
+	if t.vaultIntc != nil {
+		go t.vaultIntc.AfterWrite(context.WithoutCancel(ctx), resolved, newContent)
+	}
+
 	count := strings.Count(content, oldStr)
 	return SilentResult(fmt.Sprintf("File edited: %s (%d replacement(s))", path, count))
 }
@@ -215,7 +222,7 @@ func (t *EditTool) executeInSandbox(ctx context.Context, path, oldStr, newStr st
 		return result
 	}
 
-	if err := bridge.WriteFile(ctx, containerPath, newContent); err != nil {
+	if err := bridge.WriteFile(ctx, containerPath, newContent, false); err != nil {
 		return ErrorResult(fmt.Sprintf("failed to write file: %v", err) + MaybeFsBridgeHint(err))
 	}
 

@@ -29,7 +29,8 @@ type ReadFileTool struct {
 	sandboxMgr       sandbox.Manager         // nil = direct host access
 	contextFileIntc  *ContextFileInterceptor // nil = no virtual FS routing
 	memIntc          *MemoryInterceptor      // nil = no memory routing
-	permStore store.ConfigPermissionStore // nil = no group read restriction
+	permStore        store.ConfigPermissionStore // nil = no group read restriction
+	vaultIntc        *VaultInterceptor           // nil = no vault lazy sync
 }
 
 // SetContextFileInterceptor enables virtual FS routing for context files.
@@ -45,6 +46,11 @@ func (t *ReadFileTool) SetMemoryInterceptor(intc *MemoryInterceptor) {
 // SetConfigPermStore enables group read restriction for SOUL.md/AGENTS.md.
 func (t *ReadFileTool) SetConfigPermStore(s store.ConfigPermissionStore) {
 	t.permStore = s
+}
+
+// SetVaultInterceptor enables lazy vault hash sync on file reads.
+func (t *ReadFileTool) SetVaultInterceptor(v *VaultInterceptor) {
+	t.vaultIntc = v
 }
 
 func NewReadFileTool(workspace string, restrict bool) *ReadFileTool {
@@ -139,7 +145,7 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *Result
 			if content == "" {
 				return SilentResult(fmt.Sprintf("(memory file %s does not exist yet — it will be created when memory is saved)", path))
 			}
-			return SilentResult(content)
+			return SilentResult(content + "\n\n[Source: database, not filesystem]")
 		}
 	}
 
@@ -167,6 +173,11 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *Result
 	if isBinaryFileExt(resolved) {
 		ext := strings.ToLower(filepath.Ext(resolved))
 		return ErrorResult(fmt.Sprintf("cannot read binary file (%s). Use the appropriate tool: read_image for images, read_document for documents, read_audio for audio, read_video for video.", ext))
+	}
+
+	// Vault lazy sync: update hash if file was modified outside the agent.
+	if t.vaultIntc != nil {
+		go t.vaultIntc.BeforeRead(context.WithoutCancel(ctx), resolved)
 	}
 
 	data, err := os.ReadFile(resolved)
