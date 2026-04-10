@@ -58,6 +58,23 @@ export const MEDIA_PARAMS_SCHEMA: Record<string, Record<string, ParamField[]>> =
     ],
     gemini_native: [
       {
+        key: "resolution",
+        label: "Resolution",
+        type: "select",
+        default: "720p",
+        options: [
+          { value: "720p", label: "720p (50% cheaper)" },
+          { value: "1080p", label: "1080p" },
+        ],
+      },
+      {
+        key: "generate_audio",
+        label: "Generate Audio",
+        type: "toggle",
+        default: true,
+        description: "Auto-generate synchronized audio",
+      },
+      {
         key: "person_generation",
         label: "Person Generation",
         type: "select",

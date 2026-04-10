@@ -7,6 +7,8 @@ import { Shield, X, AlertTriangle, Plus, Brain } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { WorkspaceSharingConfig } from "@/types/agent";
 import { UserPickerCombobox } from "@/components/shared/user-picker-combobox";
+import { useContactResolver } from "@/hooks/use-contact-resolver";
+import { formatUserLabel } from "@/lib/format-user-label";
 import { InfoLabel } from "./config-section";
 
 const MAX_SHARED_USERS = 100;
@@ -22,6 +24,7 @@ export function WorkspaceSharingSection({ value, onChange }: WorkspaceSharingSec
   const [contactSearch, setContactSearch] = useState("");
 
   const existingUsers = value.shared_users ?? [];
+  const { resolve } = useContactResolver(existingUsers);
 
   const addUser = (userId: string) => {
     const trimmed = userId.trim();
@@ -49,23 +52,40 @@ export function WorkspaceSharingSection({ value, onChange }: WorkspaceSharingSec
           </div>
           <div>
             <h3 className="text-sm font-semibold">{t(`${s}.memoryGroupLabel`)}</h3>
-            <p className="text-xs text-muted-foreground">{t(`${s}.shareMemoryTip`)}</p>
+            <p className="text-xs text-muted-foreground">{t(`${s}.memoryGroupDescription`)}</p>
           </div>
         </div>
 
-        <div className={`rounded-lg border p-3 sm:p-4 ${value.share_memory ? "border-orange-400/60 bg-orange-50/30 dark:border-orange-500/30 dark:bg-orange-950/10" : ""}`}>
-          <div className="flex items-center justify-between">
-            <InfoLabel tip={t(`${s}.shareMemoryTip`)}>{t(`${s}.shareMemory`)}</InfoLabel>
-            <Switch
-              checked={value.share_memory ?? false}
-              onCheckedChange={(v) => onChange({ ...value, share_memory: v })}
-            />
+        <div className="space-y-2">
+          <div className={`rounded-lg border p-3 sm:p-4 ${value.share_memory ? "border-orange-400/60 bg-orange-50/30 dark:border-orange-500/30 dark:bg-orange-950/10" : ""}`}>
+            <div className="flex items-center justify-between">
+              <InfoLabel tip={t(`${s}.shareMemoryTip`)}>{t(`${s}.shareMemory`)}</InfoLabel>
+              <Switch
+                checked={value.share_memory ?? false}
+                onCheckedChange={(v) => onChange({ ...value, share_memory: v })}
+              />
+            </div>
+            {value.share_memory && (
+              <p className="mt-2 text-xs text-orange-600 dark:text-orange-400">
+                {t(`${s}.shareMemoryNote`)}
+              </p>
+            )}
           </div>
-          {value.share_memory && (
-            <p className="mt-2 text-xs text-orange-600 dark:text-orange-400">
-              {t(`${s}.shareMemoryNote`)}
-            </p>
-          )}
+
+          <div className={`rounded-lg border p-3 sm:p-4 ${value.share_knowledge_graph ? "border-orange-400/60 bg-orange-50/30 dark:border-orange-500/30 dark:bg-orange-950/10" : ""}`}>
+            <div className="flex items-center justify-between">
+              <InfoLabel tip={t(`${s}.shareKGTip`)}>{t(`${s}.shareKG`)}</InfoLabel>
+              <Switch
+                checked={value.share_knowledge_graph ?? false}
+                onCheckedChange={(v) => onChange({ ...value, share_knowledge_graph: v })}
+              />
+            </div>
+            {value.share_knowledge_graph && (
+              <p className="mt-2 text-xs text-orange-600 dark:text-orange-400">
+                {t(`${s}.shareKGNote`)}
+              </p>
+            )}
+          </div>
         </div>
       </section>
 
@@ -118,7 +138,7 @@ export function WorkspaceSharingSection({ value, onChange }: WorkspaceSharingSec
               <div className="flex flex-wrap gap-1.5">
                 {existingUsers.map((u, i) => (
                   <Badge key={i} variant="secondary" className="gap-1 pr-1">
-                    <span className="max-w-48 truncate">{u}</span>
+                    <span className="max-w-48 truncate">{formatUserLabel(u, resolve)}</span>
                     <button
                       type="button"
                       onClick={() => removeUser(i)}
