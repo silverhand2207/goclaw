@@ -505,7 +505,6 @@ func (c *Channel) getUpdates(timeout int) ([]zaloUpdate, error) {
 		return nil, err
 	}
 
-<<<<<<< HEAD
 	// Log raw response for debugging Zalo API shape.
 	slog.Debug("zalo getUpdates raw response", "body", string(result))
 
@@ -516,25 +515,9 @@ func (c *Channel) getUpdates(timeout int) ([]zaloUpdate, error) {
 		return nil, nil
 	}
 
-	var updates []zaloUpdate
-	if result[0] == '[' {
-		if err := json.Unmarshal(result, &updates); err != nil {
-			return nil, fmt.Errorf("unmarshal updates: %w", err)
-		}
-	} else {
-		var single zaloUpdate
-		if err := json.Unmarshal(result, &single); err != nil {
-			return nil, fmt.Errorf("unmarshal updates: %w", err)
-		}
-		// Empty object (e.g. `{}`) — no updates
-		if single.EventName != "" {
-			updates = append(updates, single)
-		}
-=======
 	var update zaloUpdate
 	if err := json.Unmarshal(result, &update); err != nil {
 		return nil, fmt.Errorf("unmarshal updates: %w", err)
->>>>>>> v3.11.3
 	}
 	if update.EventName == "" {
 		return nil, nil

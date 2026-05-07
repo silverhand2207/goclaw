@@ -11,11 +11,7 @@
 Stack mặc định gồm 5 overlay:
 
 ```bash
-COMPOSE="-f docker-compose.yml \
-  -f docker-compose.postgres.yml \
-  -f docker-compose.selfservice.yml \
-  -f docker-compose.claude-cli.yml \
-  -f docker-compose.traefik.yml"
+COMPOSE="-f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.selfservice.yml -f docker-compose.claude-cli.yml -f docker-compose.traefik.yml"
 ```
 
 ## Start
