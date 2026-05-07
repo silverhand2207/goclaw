@@ -15,6 +15,16 @@ type ContextState struct {
 	Summary        string // session summary for context continuity
 	HadBootstrap   bool
 	OverheadTokens int // system prompt + context files (accurate via TokenCounter)
+
+	// EffectiveContextWindow is the context window size (in tokens) resolved
+	// per-run from the provider/model pair via ModelRegistry. Resolved ONCE in
+	// ContextStage and read by PruneStage on every iteration. Zero means "no
+	// model-specific data available" and PruneStage falls back to
+	// PipelineConfig.ContextWindow.
+	//
+	// Resolved once per run (not per iteration) to avoid budget skew — if the
+	// model somehow changes mid-run a mismatch causes silent truncation loops.
+	EffectiveContextWindow int
 }
 
 // ThinkState: owned by ThinkStage.
@@ -22,7 +32,15 @@ type ThinkState struct {
 	LastResponse    *providers.ChatResponse
 	TotalUsage      providers.Usage
 	TruncRetries    int  // consecutive truncation retries (max 3)
+	OverflowRetries int  // context overflow compact+retry attempts (max 1)
 	StreamingActive bool // true during active stream
+
+	// Tools is populated by ContextStage (iteration=0) for overhead calculation.
+	// It holds the best-effort tool list at run start and is used exclusively by
+	// the overhead counter in ContextStage. ThinkStage does NOT consume this field —
+	// it always calls BuildFilteredTools per iteration because the tool list is
+	// iteration-dependent (final iteration strips all tools).
+	Tools []providers.ToolDefinition
 }
 
 // PruneState: owned by PruneStage.
@@ -48,6 +66,14 @@ type ObserveState struct {
 	FinalThinking  string // reasoning output
 	BlockReplies   int
 	LastBlockReply string
+
+	// AssistantImages accumulates final (non-partial) images from every iteration's
+	// ChatResponse.Images. FinalizeStage persists these to workspace/media/.
+	// Accumulation is required because LastResponse holds only the final iteration's
+	// response — if the LLM emits an image_generation_call alongside a function_call
+	// in iter N and responds text-only in iter N+1, reading only LastResponse.Images
+	// would lose the image.
+	AssistantImages []providers.ImageContent
 }
 
 // CompactState: owned by CheckpointStage + MemoryFlushStage.

@@ -3,8 +3,11 @@ package cmd
 import (
 	"context"
 	"log/slog"
+	"time"
 
+	"github.com/nextlevelbuilder/goclaw/internal/audio"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/gateway/methods"
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/media"
@@ -118,6 +121,8 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 						pgMem.UpdateChunkConfig(mem.MaxChunkLen, mem.ChunkOverlap)
 					}
 				}
+				// Note: vault enrichment provider is resolved per-tenant at runtime,
+				// no hot-reload needed here
 				slog.Debug("system_configs refreshed to in-memory config", "keys", len(sysConfigs))
 			}
 		})
@@ -128,7 +133,8 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 		d.server.SetUsageHandler(httpapi.NewUsageHandler(d.pgStores.Snapshots, d.pgStores.DB))
 	}
 
-	// Runtime package management (install/uninstall system/pip/npm packages)
+	// Runtime package management (install/uninstall system/pip/npm/github packages)
+	initGitHubInstaller()
 	d.server.SetPackagesHandler(httpapi.NewPackagesHandler())
 
 	// API documentation (OpenAPI spec + Swagger UI at /docs)
@@ -167,12 +173,28 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 		if d.pgStores.Agents != nil {
 			evoOpts = append(evoOpts, httpapi.WithAgentStore(d.pgStores.Agents))
 		}
+		if d.pgStores.BuiltinToolTenantCfgs != nil {
+			evoOpts = append(evoOpts, httpapi.WithToolTenantCfgs(d.pgStores.BuiltinToolTenantCfgs))
+		}
 		d.server.SetEvolutionHandler(httpapi.NewEvolutionHandler(d.pgStores.EvolutionMetrics, d.pgStores.EvolutionSuggestions, evoOpts...))
 	}
 
 	// V3: Knowledge Vault document API
 	if d.pgStores != nil && d.pgStores.Vault != nil {
-		d.server.SetVaultHandler(httpapi.NewVaultHandler(d.pgStores.Vault, d.pgStores.Teams))
+		vh := httpapi.NewVaultHandler(d.pgStores.Vault, d.pgStores.Teams, d.workspace, d.domainBus, d.pgStores.Agents, d.pgStores.Teams)
+		vh.SetEnrichProgress(d.enrichProgress)
+		vh.SetEnrichWorker(d.enrichWorker)
+		d.server.SetVaultHandler(vh)
+
+		// Lightweight graph visualization endpoints (vault + KG).
+		var kgGraph store.KGGraphStore
+		if d.pgStores.KnowledgeGraph != nil {
+			kgGraph = newKGGraphStore(d.pgStores.DB)
+		}
+		vgHandler := httpapi.NewVaultGraphHandler(
+			newVaultGraphStore(d.pgStores.DB), kgGraph, d.pgStores.Teams,
+		)
+		d.server.SetVaultGraphHandler(vgHandler)
 	}
 
 	// V3: Episodic memory summaries API
@@ -202,6 +224,49 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 	// Media serve endpoint — serves persisted media files by ID for WS/web clients.
 	if mediaStore != nil {
 		d.server.SetMediaServeHandler(httpapi.NewMediaServeHandler(mediaStore))
+	}
+
+	// ElevenLabs voice list + refresh endpoints (GET /v1/voices, POST /v1/voices/refresh).
+	// VoiceCache is shared between the HTTP handler and the WS voices.list method.
+	// TTL 1h + LRU cap 1000 tenants.
+	{
+		voiceCache := audio.NewVoiceCache(1*time.Hour, 1000)
+		var secretStore store.ConfigSecretsStore
+		if d.pgStores != nil && d.pgStores.ConfigSecrets != nil {
+			secretStore = d.pgStores.ConfigSecrets
+		}
+		var tenantStore store.TenantStore
+		if d.pgStores != nil && d.pgStores.Tenants != nil {
+			tenantStore = d.pgStores.Tenants
+		}
+		voicesH := httpapi.NewVoicesHandler(voiceCache, secretStore, tenantStore)
+		d.server.SetVoicesHandler(voicesH)
+		// Wire WS method — provider nil means each request resolves key via secretStore at HTTP layer.
+		// For WS, use same cache. Provider is resolved via secretStore at WS level in a future phase.
+		methods.NewVoicesMethods(voiceCache, nil).Register(d.server.Router())
+	}
+
+	// TTS synthesize endpoint — shares audio.Manager with setupTTS.
+	if d.audioMgr != nil {
+		ttsH := httpapi.NewTTSHandler(d.audioMgr)
+		// Reuse the server's rate limiter (per-IP/token; NOT per-user).
+		// Server.RateLimiter() is non-nil by construction (server.go:104).
+		if rl := d.server.RateLimiter(); rl != nil && rl.Enabled() {
+			ttsH.SetRateLimiter(rl.Allow)
+		}
+		// Wire stores for per-tenant TTS config lookup at synthesis time.
+		if d.pgStores.SystemConfigs != nil && d.pgStores.ConfigSecrets != nil {
+			ttsH.SetStores(d.pgStores.SystemConfigs, d.pgStores.ConfigSecrets)
+			// Wire tenant resolver for channels TTS auto-apply
+			d.audioMgr.SetTenantResolver(httpapi.NewTenantTTSResolver(d.pgStores.SystemConfigs, d.pgStores.ConfigSecrets))
+		}
+		d.server.SetTTSHandler(ttsH)
+		d.ttsHandler = ttsH // store for hot-reload
+	}
+
+	// Per-tenant TTS config endpoint — allows tenant admins to configure TTS.
+	if d.pgStores.SystemConfigs != nil && d.pgStores.ConfigSecrets != nil {
+		d.server.SetTTSConfigHandler(httpapi.NewTTSConfigHandler(d.pgStores.SystemConfigs, d.pgStores.ConfigSecrets))
 	}
 
 	// Seed + apply builtin tool disables

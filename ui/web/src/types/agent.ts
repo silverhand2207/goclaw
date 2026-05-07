@@ -16,6 +16,7 @@ export interface SubagentsConfig {
   maxSpawnDepth?: number;
   maxChildrenPerAgent?: number;
   archiveAfterMinutes?: number;
+  maxRetries?: number;
   model?: string;
 }
 
@@ -31,6 +32,7 @@ export interface CompactionConfig {
 
 export interface ContextPruningConfig {
   mode?: "off" | "cache-ttl";
+  ttl?: string;             // cache TTL gate duration, e.g. "5m" (default). Only used when mode="cache-ttl"
   keepLastAssistants?: number;
   softTrimRatio?: number;
   hardClearRatio?: number;
@@ -67,6 +69,20 @@ export interface MemoryConfig {
   vector_weight?: number;
   text_weight?: number;
   min_score?: number;
+  dreaming?: DreamingConfig | null;
+}
+
+/**
+ * DreamingConfig mirrors Go internal/config.DreamingConfig — per-agent
+ * overrides for the consolidation dreaming worker. Pointer fields stay
+ * undefined when the operator hasn't set them so partial overrides merge
+ * cleanly with backend defaults.
+ */
+export interface DreamingConfig {
+  enabled?: boolean;
+  debounce_ms?: number;
+  threshold?: number;
+  verbose_log?: boolean;
 }
 
 export interface WorkspaceSharingConfig {
@@ -75,16 +91,14 @@ export interface WorkspaceSharingConfig {
   shared_users?: string[];
   share_memory?: boolean;
   share_knowledge_graph?: boolean;
+  share_sessions?: boolean;
 }
 
 export type ChatGPTOAuthRoutingStrategy =
-  | "manual"
-  | "primary_first"
   | "round_robin"
   | "priority_order";
 
 export type EffectiveChatGPTOAuthRoutingStrategy =
-  | "primary_first"
   | "round_robin"
   | "priority_order";
 

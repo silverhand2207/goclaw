@@ -15,7 +15,9 @@ import (
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/nextlevelbuilder/goclaw/internal/security"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/store/pg"
 )
 
 const defaultTestDSN = "postgres://postgres:test@localhost:5433/goclaw_test?sslmode=disable"
@@ -58,6 +60,13 @@ func testDB(t *testing.T) *sql.DB {
 			return
 		}
 		m.Close()
+
+		// Initialize pg package's sqlx wrapper. Without this, any store
+		// method that uses pkgSqlxDB.SelectContext panics on nil deref if
+		// the test runs before any other test happens to call InitSqlx.
+		// Centralizing here removes the ordering-dependency land mine.
+		pg.InitSqlx(db)
+
 		sharedDB = db
 	})
 
@@ -173,6 +182,14 @@ func crossTenantCtx() context.Context {
 	return store.WithCrossTenant(
 		store.WithTenantID(context.Background(), store.MasterTenantID),
 	)
+}
+
+func allowLoopbackForTest(t *testing.T) {
+	t.Helper()
+	security.SetAllowLoopbackForTest(true)
+	t.Cleanup(func() {
+		security.SetAllowLoopbackForTest(false)
+	})
 }
 
 // testEncryptionKey is a fixed 32-byte key for stores that require AES-256-GCM encryption in tests.

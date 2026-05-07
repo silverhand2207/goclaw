@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,16 +16,25 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
+// recallCall is a single RecordRecall invocation captured by the mock store
+// so tests can assert the (id, score) stream forwarded by memory_search.
+type recallCall struct {
+	ID    string
+	Score float64
+}
+
 // mockEpisodicStore implements store.EpisodicStore for testing.
 type mockEpisodicStore struct {
-	created       []*store.EpisodicSummary
-	existsByID    map[string]bool
-	unpromoted    []store.EpisodicSummary
-	promoted      map[string]bool
-	countResult   int
-	pruneErr      error
-	pruneCount    int
-	mu            sync.Mutex
+	created     []*store.EpisodicSummary
+	existsByID  map[string]bool
+	unpromoted  []store.EpisodicSummary
+	promoted    map[string]bool
+	countResult int
+	countCalls  int // set by CountUnpromoted — used by disabled-skip tests
+	recallCalls []recallCall
+	pruneErr    error
+	pruneCount  int
+	mu          sync.Mutex
 }
 
 func (m *mockEpisodicStore) Create(_ context.Context, ep *store.EpisodicSummary) error {
@@ -68,6 +78,7 @@ func (m *mockEpisodicStore) PruneExpired(_ context.Context) (int, error) {
 func (m *mockEpisodicStore) CountUnpromoted(_ context.Context, _, _ string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.countCalls++
 	return m.countResult, nil
 }
 
@@ -75,6 +86,23 @@ func (m *mockEpisodicStore) ListUnpromoted(_ context.Context, _, _ string, _ int
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.unpromoted, nil
+}
+
+// ListUnpromotedScored returns the same fixture as ListUnpromoted; tests that
+// need to verify sort order override the method directly on a dedicated mock.
+func (m *mockEpisodicStore) ListUnpromotedScored(_ context.Context, _, _ string, _ int) ([]store.EpisodicSummary, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.unpromoted, nil
+}
+
+// RecordRecall appends the call into the recallCalls slice so tests can
+// assert which episodic IDs received which score.
+func (m *mockEpisodicStore) RecordRecall(_ context.Context, id string, score float64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recallCalls = append(m.recallCalls, recallCall{ID: id, Score: score})
+	return nil
 }
 
 func (m *mockEpisodicStore) MarkPromoted(_ context.Context, ids []string) error {
@@ -273,15 +301,14 @@ func TestEpisodicWorkerHandle_WithSummary(t *testing.T) {
 
 	worker := &episodicWorker{
 		store:    mockStore,
-		provider: mockProvider,
-		model:    "test-model",
+		registry: testRegistry(mockProvider),
 		eventBus: mockEventBus,
 	}
 
 	ctx := context.Background()
 	event := eventbus.DomainEvent{
 		Type:     eventbus.EventSessionCompleted,
-		TenantID: uuid.New().String(),
+		TenantID: providers.MasterTenantID.String(),
 		AgentID:  uuid.New().String(),
 		UserID:   "test-user",
 		Payload: &eventbus.SessionCompletedPayload{
@@ -354,6 +381,66 @@ func TestEpisodicWorkerHandle_DuplicateSourceID(t *testing.T) {
 	// Should not create new episodic for duplicate
 	if len(mockStore.created) != 0 {
 		t.Errorf("Expected 0 created episodics for duplicate, got %d", len(mockStore.created))
+	}
+}
+
+// TestEpisodicWorkerHandle_NonUUIDAgentID guards the regression where Loop
+// published DomainEvent.AgentID as the agent key (e.g. "goctech-leader")
+// instead of l.agentUUID.String(). The episodic worker must reject such
+// events with a clear error — never panic, never leak a raw PG error.
+func TestEpisodicWorkerHandle_NonUUIDAgentID(t *testing.T) {
+	mockStore := &mockEpisodicStore{}
+	worker := &episodicWorker{store: mockStore}
+
+	ctx := context.Background()
+	event := eventbus.DomainEvent{
+		Type:     eventbus.EventSessionCompleted,
+		TenantID: uuid.New().String(),
+		AgentID:  "goctech-leader", // agent key, not a UUID
+		UserID:   "test-user",
+		Payload: &eventbus.SessionCompletedPayload{
+			SessionKey:      "session-123",
+			CompactionCount: 0,
+			Summary:         "Summary",
+		},
+	}
+
+	err := worker.Handle(ctx, event)
+	if err == nil {
+		t.Fatal("Expected error for non-UUID agent_id, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid agent_id") {
+		t.Errorf("Expected 'invalid agent_id' error, got: %v", err)
+	}
+	if len(mockStore.created) != 0 {
+		t.Errorf("Expected no episodic created on bad agent_id, got %d", len(mockStore.created))
+	}
+}
+
+// TestEpisodicWorkerHandle_NonUUIDTenantID mirrors the agent_id guard for tenant_id.
+func TestEpisodicWorkerHandle_NonUUIDTenantID(t *testing.T) {
+	mockStore := &mockEpisodicStore{}
+	worker := &episodicWorker{store: mockStore}
+
+	ctx := context.Background()
+	event := eventbus.DomainEvent{
+		Type:     eventbus.EventSessionCompleted,
+		TenantID: "not-a-uuid",
+		AgentID:  uuid.New().String(),
+		UserID:   "test-user",
+		Payload: &eventbus.SessionCompletedPayload{
+			SessionKey:      "session-123",
+			CompactionCount: 0,
+			Summary:         "Summary",
+		},
+	}
+
+	err := worker.Handle(ctx, event)
+	if err == nil {
+		t.Fatal("Expected error for non-UUID tenant_id, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid tenant_id") {
+		t.Errorf("Expected 'invalid tenant_id' error, got: %v", err)
 	}
 }
 
@@ -607,8 +694,7 @@ func TestDreamingWorkerHandle_MeetsThreshold(t *testing.T) {
 	worker := &dreamingWorker{
 		episodicStore: mockEpisodic,
 		memoryStore:   mockMemory,
-		provider:      mockProvider,
-		model:         "test-model",
+		registry:      testRegistry(mockProvider),
 		threshold:     5,
 		debounce:      1 * time.Second,
 	}
@@ -616,7 +702,7 @@ func TestDreamingWorkerHandle_MeetsThreshold(t *testing.T) {
 	ctx := context.Background()
 	event := eventbus.DomainEvent{
 		Type:     eventbus.EventEpisodicCreated,
-		TenantID: uuid.New().String(),
+		TenantID: providers.MasterTenantID.String(),
 		AgentID:  "agent-123",
 		UserID:   "user-123",
 		Payload:  &eventbus.EpisodicCreatedPayload{},
@@ -664,8 +750,7 @@ func TestDreamingWorkerHandle_DebounceSkip(t *testing.T) {
 	worker := &dreamingWorker{
 		episodicStore: mockEpisodic,
 		memoryStore:   mockMemory,
-		provider:      mockProvider,
-		model:         "test-model",
+		registry:      testRegistry(mockProvider),
 		threshold:     5,
 		debounce:      10 * time.Second,
 	}
@@ -675,7 +760,7 @@ func TestDreamingWorkerHandle_DebounceSkip(t *testing.T) {
 	// First run should succeed
 	event1 := eventbus.DomainEvent{
 		Type:     eventbus.EventEpisodicCreated,
-		TenantID: uuid.New().String(),
+		TenantID: providers.MasterTenantID.String(),
 		AgentID:  "agent-123",
 		UserID:   "user-123",
 		Payload: &eventbus.EpisodicCreatedPayload{
@@ -740,8 +825,7 @@ func TestRegister_WiresAllWorkers(t *testing.T) {
 		KGStore:       mockKG,
 		SessionStore:  mockSession,
 		EventBus:      mockEventBus,
-		Provider:      mockProvider,
-		Model:         "test-model",
+		Registry:      testRegistry(mockProvider),
 		Extractor:     mockExtractor,
 	}
 

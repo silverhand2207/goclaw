@@ -95,7 +95,7 @@ export function KGEntityDetailDialog({ open, onOpenChange, agentId, entity, getE
     if (open && entity && !traversing) {
       traverse(entity.id, entity.user_id, depth);
     }
-  }, [open, entity]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open, entity]);  
 
   // Build graph data from traversal results
   const graphData = useMemo(() => {
@@ -239,7 +239,7 @@ export function KGEntityDetailDialog({ open, onOpenChange, agentId, entity, getE
                   </div>
                 ) : graphData ? (
                   <div className="h-[400px]">
-                    <KGGraphView entities={graphData.entities} relations={graphData.relations} />
+                    <KGGraphView entities={graphData.entities} relations={graphData.relations} compact />
                   </div>
                 ) : (
                   <div className="flex items-center justify-center h-[400px] text-sm text-muted-foreground">

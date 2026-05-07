@@ -21,8 +21,37 @@ func newVaultStore(db *sql.DB) *pg.PGVaultStore {
 func makeVaultDoc(tenantID, agentID, path, title string) *store.VaultDocument {
 	return &store.VaultDocument{
 		TenantID:    tenantID,
-		AgentID:     agentID,
+		AgentID:     &agentID,
 		Scope:       "personal",
+		Path:        path,
+		Title:       title,
+		DocType:     "note",
+		ContentHash: "abc123",
+	}
+}
+
+// makeSharedVaultDoc builds a shared (agent_id=NULL, scope='shared') vault document.
+// Used to seed characterization tests that verify shared docs are visible to agents.
+func makeSharedVaultDoc(tenantID, path, title string) *store.VaultDocument {
+	return &store.VaultDocument{
+		TenantID:    tenantID,
+		AgentID:     nil, // NULL — shared doc
+		TeamID:      nil,
+		Scope:       "shared",
+		Path:        path,
+		Title:       title,
+		DocType:     "note",
+		ContentHash: "abc123",
+	}
+}
+
+// makeTeamVaultDoc builds a team-scoped vault document (agent_id=NULL, team_id set, scope='team').
+func makeTeamVaultDoc(tenantID, teamID, path, title string) *store.VaultDocument {
+	return &store.VaultDocument{
+		TenantID:    tenantID,
+		AgentID:     nil, // NULL for team docs
+		TeamID:      &teamID,
+		Scope:       "team",
 		Path:        path,
 		Title:       title,
 		DocType:     "note",

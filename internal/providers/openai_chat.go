@@ -24,7 +24,16 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (*ChatRespon
 	if err != nil {
 		if clamped := clampMaxTokensFromError(err, body); clamped {
 			slog.Info("max_tokens clamped, retrying", "model", model, "limit", clampedLimit(body))
-			return RetryDo(ctx, p.retryConfig, chatFn)
+			resp, err = RetryDo(ctx, p.retryConfig, chatFn)
+		}
+	}
+
+	// Drop user-visible reasoning for models flagged as leakers (e.g. Kimi,
+	// DeepSeek-Reasoner). Usage.ThinkingTokens is preserved so billing stays
+	// correct (Phase 1 depends on this).
+	if resp != nil {
+		if strip, _ := req.Options[OptStripThinking].(bool); strip {
+			resp.Thinking = ""
 		}
 	}
 
@@ -52,6 +61,9 @@ func (p *OpenAIProvider) chatRequestFn(ctx context.Context, body map[string]any)
 
 func (p *OpenAIProvider) ChatStream(ctx context.Context, req ChatRequest, onChunk func(StreamChunk)) (*ChatResponse, error) {
 	model := p.resolveModel(req.Model)
+	// stripThinking suppresses user-visible reasoning while leaving
+	// Usage.ThinkingTokens untouched (the usage chunk below still records it).
+	stripThinking, _ := req.Options[OptStripThinking].(bool)
 	body := p.buildRequestBody(model, req, true)
 	body = ApplyMiddlewares(body, p.middlewares, p.middlewareConfig(model, req))
 
@@ -72,12 +84,14 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req ChatRequest, onChun
 	if err != nil {
 		return nil, err
 	}
-	defer respBody.Close()
+	// Wrap respBody so ctx cancellation closes the socket, unblocking bufio.Scanner.
+	cb := NewCtxBody(ctx, respBody)
+	defer cb.Close()
 
 	result := &ChatResponse{FinishReason: "stop"}
 	accumulators := make(map[int]*toolCallAccumulator)
 
-	sse := NewSSEScanner(respBody)
+	sse := NewSSEScanner(cb)
 	for sse.Next() {
 		data := sse.Data()
 
@@ -112,7 +126,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req ChatRequest, onChun
 		if reasoning == "" {
 			reasoning = delta.Reasoning
 		}
-		if reasoning != "" {
+		if reasoning != "" && !stripThinking {
 			result.Thinking += reasoning
 			if onChunk != nil {
 				onChunk(StreamChunk{Thinking: reasoning})
@@ -123,6 +137,22 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req ChatRequest, onChun
 			if onChunk != nil {
 				onChunk(StreamChunk{Content: delta.Content})
 			}
+		}
+
+		// Accumulate images from delta.images[].
+		// Each chunk may carry one or more image parts; we collect all into result.Images.
+		// Malformed data URLs are skipped with a warning — they don't abort the stream.
+		for _, img := range delta.Images {
+			mimeType, b64Data, err := parseDataURL(img.ImageURL.URL)
+			if err != nil {
+				slog.Warn("openai_stream: skipping malformed image data URL",
+					"type", img.Type, "url_len", len(img.ImageURL.URL), "error", err)
+				continue
+			}
+			result.Images = append(result.Images, ImageContent{
+				MimeType: mimeType,
+				Data:     b64Data,
+			})
 		}
 
 		// Accumulate streamed tool calls

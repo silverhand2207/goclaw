@@ -14,9 +14,11 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
-	"github.com/nextlevelbuilder/goclaw/internal/orchestration"
 	"github.com/nextlevelbuilder/goclaw/internal/edition"
 	"github.com/nextlevelbuilder/goclaw/internal/eventbus"
+	"github.com/nextlevelbuilder/goclaw/internal/hooks"
+	hookbuiltin "github.com/nextlevelbuilder/goclaw/internal/hooks/builtin"
+	"github.com/nextlevelbuilder/goclaw/internal/orchestration"
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 	kg "github.com/nextlevelbuilder/goclaw/internal/knowledgegraph"
 	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
@@ -42,6 +44,7 @@ func wireExtras(
 	stores *store.Stores,
 	agentRouter *agent.Router,
 	providerReg *providers.Registry,
+	modelReg providers.ModelRegistry,
 	msgBus *bus.MessageBus,
 	sessStore store.SessionStore,
 	toolsReg *tools.Registry,
@@ -124,8 +127,10 @@ func wireExtras(
 
 	// 5. Shared MCP connection pool (eliminates duplicate connections across agents)
 	var mcpPool *mcpbridge.Pool
+	var mcpGrantChecker mcpbridge.GrantChecker
 	if stores.MCP != nil {
 		mcpPool = mcpbridge.NewPool(mcpbridge.DefaultPoolConfig())
+		mcpGrantChecker = mcpbridge.NewStoreGrantChecker(stores.MCP, msgBus)
 	}
 
 	// 6. Set up agent resolver: lazy-creates Loops from DB
@@ -140,10 +145,56 @@ func wireExtras(
 		autoInjector = memorypkg.NewAutoInjector(stores.Episodic, stores.EvolutionMetrics)
 	}
 
+	// vaultIntc is set later by wireVault but captured by closure in OnTextUploaded.
+	var vaultIntc *tools.VaultInterceptor
+
+	// Agent Hooks (Issue #875) — lifecycle dispatcher + handlers.
+	var hookDispatcher hooks.Dispatcher = hooks.NewNoopDispatcher()
+	if hs, ok := stores.Hooks.(hooks.HookStore); ok && hs != nil {
+		// Phase 04: wire builtin registry. Install a strip-all lookup FIRST so a
+		// Load() failure leaves the dispatcher failing closed (no wide fallback
+		// via the Phase 03 permissive default). On successful Load we swap in the
+		// real per-id allowlist, then UPSERT canonical rows with stable UUIDv5s.
+		// Seed failures log but never block startup.
+		hooks.SetBuiltinAllowlistLookup(func(uuid.UUID) []string { return nil })
+		if err := hookbuiltin.Load(); err != nil {
+			slog.Warn("hooks.builtin_load_failed", "err", err)
+		} else {
+			hooks.SetBuiltinAllowlistLookup(hookbuiltin.AllowlistFor)
+			if err := hookbuiltin.Seed(context.Background(), hs, appCfg.Hooks); err != nil {
+				slog.Warn("hooks.builtin_seed_failed", "err", err)
+			}
+		}
+
+		// Phase 07: runtime migration — auto-disable legacy command-type hooks
+		// on Standard edition. No-op on Lite. Idempotent. Runs synchronously
+		// before listeners so traffic never sees a command hook fire on a
+		// post-Wave-1 Standard instance.
+		if n, err := hooks.DisableLegacyCommandHooks(context.Background(), hs, edition.Current()); err != nil {
+			slog.Warn("hooks.command_migration_failed", "err", err)
+		} else if n > 0 {
+			slog.Info("hooks.command_migration_ran",
+				"disabled_count", n, "edition", edition.Current().Name)
+		}
+
+		handlers := buildHookHandlers(stores, providerReg, appCfg.Hooks)
+		stdOpts := hooks.StdDispatcherOpts{
+			Store:    hs,
+			Audit:    hooks.NewAuditWriter(hs, ""),
+			Handlers: handlers,
+		}
+		hookDispatcher = hooks.NewStdDispatcher(stdOpts)
+		hooks.SubscribeDelegateEvents(domainBus, hookDispatcher)
+		// Stash handlers for later gateway.go wiring (test runner).
+		sharedHookHandlers = handlers
+		slog.Info("agent hooks dispatcher wired", "handlers", "command,http,prompt")
+	}
+
 	resolver := agent.NewManagedResolver(agent.ResolverDeps{
 		AgentStore:             stores.Agents,
 		ProviderStore:          stores.Providers,
 		ProviderReg:            providerReg,
+		ModelRegistry:          modelReg,
 		Bus:                    msgBus,
 		Sessions:               sessStore,
 		Tools:                  toolsReg,
@@ -157,6 +208,7 @@ func wireExtras(
 		ContextFileLoader:      contextFileLoader,
 		BootstrapCleanup:       buildBootstrapCleanup(stores.Agents),
 		CacheInvalidate:        buildCacheInvalidate(contextFileInterceptor),
+		DefaultTimezone:        appCfg.Cron.DefaultTimezone,
 		InjectionAction:        injectionAction,
 		MaxMessageChars:        appCfg.Gateway.MaxMessageChars,
 		CompactionCfg:          appCfg.Agents.Defaults.Compaction,
@@ -171,6 +223,7 @@ func wireExtras(
 		BuiltinToolStore:       stores.BuiltinTools,
 		MCPStore:               stores.MCP,
 		MCPPool:                mcpPool,
+		MCPGrantChecker:        mcpGrantChecker,
 		ConfigPermStore:        stores.ConfigPermissions,
 		MediaStore:             mediaStore,
 		ModelPricing:           appCfg.Telemetry.ModelPricing,
@@ -180,10 +233,18 @@ func wireExtras(
 		TenantStore:            stores.Tenants,
 		BuiltinToolTenantCfgs:  stores.BuiltinToolTenantCfgs,
 		SkillTenantCfgs:        stores.SkillTenantCfgs,
+		SystemConfigs:          stores.SystemConfigs,
 		Workspace:              workspace,
+		TTSAutoMode:            appCfg.Tts.Auto,
 		AutoInjector:           autoInjector,
 		EvolutionMetricsStore:  stores.EvolutionMetrics,
 		DomainBus:              domainBus,
+		HookDispatcher:         hookDispatcher,
+		OnTextUploaded: func(ctx context.Context, path, content string) {
+			if vaultIntc != nil {
+				vaultIntc.AfterWrite(ctx, path, content)
+			}
+		},
 		OnEvent: func(event agent.AgentEvent) {
 			// Sign /v1/files/ and /v1/media/ URLs in content before delivery.
 			// Sessions store clean paths; signing happens only at delivery time.
@@ -339,7 +400,7 @@ func wireExtras(
 	}
 
 	// Wire vault tools and interceptors (conditional on vault store availability)
-	wireVault(stores, toolsReg, workspace, domainBus)
+	vaultIntc = wireVault(stores, toolsReg, workspace, domainBus)
 
 	// Wire delegate tool for inter-agent delegation via agent_links.
 	if stores.AgentLinks != nil && stores.Agents != nil {
@@ -373,6 +434,7 @@ func wireExtras(
 		}
 		delegateTool := tools.NewDelegateTool(stores.AgentLinks, stores.Agents, domainBus, delegateRunFn)
 		delegateTool.SetMsgBus(msgBus)
+		delegateTool.SetHookDispatcher(hookDispatcher)
 		toolsReg.Register(delegateTool)
 		slog.Info("delegate tool wired")
 	}
@@ -416,7 +478,11 @@ func wireExtras(
 		}
 	})
 
-	// Skills cache: bump version on skill changes
+	// Skills cache: bump version on every event (global listCache is
+	// version-keyed, so bump invalidates every tenant's ListSkills cache —
+	// cheap since rebuild is a single DB read). Then the agent router
+	// receives a scoped wipe: tenant-scoped events only wipe that tenant's
+	// cached Loops; master/global events wipe the entire router cache.
 	if stores.Skills != nil {
 		msgBus.Subscribe(bus.TopicCacheSkills, func(event bus.Event) {
 			if event.Name != protocol.EventCacheInvalidate {
@@ -427,6 +493,11 @@ func wireExtras(
 				return
 			}
 			stores.Skills.BumpVersion()
+			if payload.TenantID != uuid.Nil {
+				agentRouter.InvalidateTenant(payload.TenantID)
+				return
+			}
+			agentRouter.InvalidateAll()
 		})
 	}
 
@@ -496,7 +567,9 @@ func wireExtras(
 		})
 	}
 
-	// Builtin tools cache: re-apply disables on settings/enabled changes
+	// Builtin tools cache: re-apply disables on settings/enabled changes.
+	// Tenant-scoped events only invalidate that tenant's cached agents — the
+	// global registry disables list is master-only and unaffected.
 	if stores.BuiltinTools != nil {
 		msgBus.Subscribe(bus.TopicCacheBuiltinTools, func(event bus.Event) {
 			if event.Name != protocol.EventCacheInvalidate {
@@ -504,6 +577,10 @@ func wireExtras(
 			}
 			payload, ok := event.Payload.(bus.CacheInvalidatePayload)
 			if !ok || payload.Kind != bus.CacheKindBuiltinTools {
+				return
+			}
+			if payload.TenantID != uuid.Nil {
+				agentRouter.InvalidateTenant(payload.TenantID)
 				return
 			}
 			applyBuiltinToolDisables(context.Background(), stores.BuiltinTools, toolsReg)
