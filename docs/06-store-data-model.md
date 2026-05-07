@@ -47,6 +47,7 @@ The `Stores` struct is the top-level container holding all PostgreSQL-backed sto
 | SnapshotStore | `PGSnapshotStore` | Hourly usage snapshots, cost aggregation, time series queries |
 | SecureCLIStore | `PGSecureCLIStore` | CLI binary configs with encrypted credential injection |
 | APIKeyStore | `PGAPIKeyStore` | Gateway API keys, scopes, expiration, revocation |
+| HookStore | `PGHookStore` | Lifecycle hook definitions (event, handler type, matcher, config), execution audit log |
 
 ### SQLite Parity (Lite Edition)
 
@@ -63,6 +64,7 @@ The `Stores` struct is the top-level container holding all PostgreSQL-backed sto
 | AgentLinksStore | `SQLiteAgentLinks` | LIKE search, no vector |
 | SubagentTasksStore | `SQLiteSubagentTasks` | ✓ Parity (json_set for metadata merge) |
 | SecureCLIStore | `SQLiteSecureCLIStore` | ✓ Parity + AES-256-GCM encryption mandatory (GOCLAW_KEY env var required) |
+| HookStore | `SQLiteHookStore` | ✓ Parity (agent_hooks + hook_executions tables, same schema as PG) |
 
 ---
 
@@ -100,6 +102,18 @@ flowchart TD
 | Subagent | `agent:{agentId}:subagent:{label}` | `agent:default:subagent:my-task` |
 | Cron | `agent:{agentId}:cron:{jobId}:run:{runId}` | `agent:default:cron:reminder:run:abc123` |
 | Main | `agent:{agentId}:{mainKey}` | `agent:default:main` |
+
+### Session Metadata - Compaction Tracking
+
+**New well-known metadata key** (Phase 5 follow-up): `last_compaction_at` (RFC3339 string)
+
+This timestamp is written to `sessions.metadata` JSONB after successful message compaction (context pruning). Both execution paths update it:
+- **V3 pipeline**: `PruneStage.CompactMessages()` after successful compaction
+- **V2 legacy**: `maybeSummarize()` goroutine after successful summarization
+
+Operators can read this via `GetSessionMetadata()` to understand when a session was last compacted. The web UI optionally displays this timestamp in a context-usage tooltip.
+
+Go constant export: `agent.SessionMetaKeyLastCompactionAt = "last_compaction_at"`
 
 ---
 
@@ -661,7 +675,7 @@ L0 (Working Memory)           L1 (Episodic Memory)        L2 (Semantic Memory)
 
 | Table | Purpose | Key Columns |
 |-------|---------|-------------|
-| `episodic_summaries` | Session conversation summaries | `agent_id`, `user_id`, `session_key`, `summary`, `l0_abstract`, `key_topics` (TEXT[]), `embedding` (vector), `source_id` (dedup), `expires_at` |
+| `episodic_summaries` | Session conversation summaries | `agent_id`, `user_id`, `session_key`, `summary`, `l0_abstract`, `key_topics` (TEXT[]), `embedding` (vector), `source_id` (dedup), `expires_at`, `recall_count` (INT), `recall_score` (FLOAT), `last_recalled_at` (TIMESTAMPTZ) |
 | `agent_evolution_metrics` | Self-evolution performance data | `agent_id`, `session_key`, `metric_type` (retrieval/tool/feedback), `metric_key`, `value` (JSONB) |
 | `agent_evolution_suggestions` | Data-driven improvement suggestions | `agent_id`, `suggestion_type`, `suggestion`, `rationale`, `parameters` (JSONB), `status` (pending/approved/rejected/applied) |
 | `vault_documents` | Knowledge Vault document registry | `agent_id`, `scope` (personal/team/shared), `path`, `title`, `doc_type`, `content_hash`, `embedding` (vector), `metadata` (JSONB) |
@@ -757,7 +771,25 @@ flowchart TD
 | **EpisodicWorker** | `run.completed` | Extract session summary via LLM or compaction summary. Generate L0 abstract. Store in `episodic_summaries`. Emit `episodic.created` |
 | **SemanticWorker** | `episodic.created` | Parse summary for entity mentions and relationships. Extract via regex/NER. Insert into KG tables (`kg_entities`, `kg_relations`). Emit `entity.upserted` |
 | **DedupWorker** | `entity.upserted` | Check for duplicate entities via embedding similarity. Merge duplicate nodes by redirecting relations. Update timestamps to reflect consolidation |
-| **DreamingWorker** | `episodic.created` (debounced 10m) | Batch collect unpromoted episodic summaries. Call LLM for synthesis/insight pass. Write results to long-term memory (update KG, write to vault, etc.) |
+| **DreamingWorker** | `episodic.created` (debounced 10m) | Batch collect unpromoted episodic summaries scored by usefulness (recall signal). Call LLM for synthesis/insight pass. Write results to long-term memory (update KG, write to vault, etc.) |
+
+### Dreaming Weighted Scoring (Phase 10, Migration 000045)
+
+The DreamingWorker prioritizes unpromoted episodic summaries by usefulness via a 4-component running-average score:
+
+**ComputeRecallScore formula** (14-day half-life):
+```
+score = 0.30 * frequency + 0.35 * relevance + 0.20 * recency + 0.15 * freshness
+```
+
+**Tracking columns** (added to `episodic_summaries`):
+- `recall_count INT DEFAULT 0` — Number of times this summary was returned in memory searches
+- `recall_score DOUBLE PRECISION DEFAULT 0` — Weighted average score (0 to 1)
+- `last_recalled_at TIMESTAMPTZ` — Timestamp of most recent search hit
+
+**Index for DreamingWorker**: `idx_episodic_recall_unpromoted` on `(agent_id, user_id, recall_score DESC) WHERE promoted_at IS NULL`. Enables efficient `ListUnpromotedScored()` queries to fetch highest-scoring summaries first.
+
+**Integration with memory_search tool**: After search results are returned to agent, a fire-and-forget task increments `recall_count`, updates `recall_score` via running average, and sets `last_recalled_at`. No blocking — search returns immediately.
 
 ### Configuration
 
@@ -772,52 +804,11 @@ Workers subscribe on startup via `consolidation.Register()`.
 
 ## 18. File Reference
 
-| File | Purpose |
-|------|---------|
-| `internal/store/stores.go` | `Stores` container struct (all 22 store interfaces) |
-| `internal/store/types.go` | `BaseModel`, `StoreConfig`, `GenNewID()` |
-| `internal/store/context.go` | Context propagation: `WithUserID`, `WithAgentID`, `WithAgentType`, `WithSenderID`, `WithTenantID` |
-| `internal/store/session_store.go` | `SessionStore` interface, `SessionData`, `SessionInfo` |
-| `internal/store/memory_store.go` | `MemoryStore` interface, `MemorySearchResult`, `EmbeddingProvider` |
-| `internal/store/skill_store.go` | `SkillStore` interface |
-| `internal/store/agent_store.go` | `AgentStore` interface |
-| `internal/store/team_store.go` | `TeamStore` interface, `TeamData`, `TeamTaskData`, `DelegationHistoryData`, `TeamMessageData` |
-| `internal/store/provider_store.go` | `ProviderStore` interface |
-| `internal/store/tracing_store.go` | `TracingStore` interface, `TraceData`, `SpanData` |
-| `internal/store/mcp_store.go` | `MCPServerStore` interface, grant types, access request types |
-| `internal/store/channel_instance_store.go` | `ChannelInstanceStore` interface |
-| `internal/store/config_secrets_store.go` | `ConfigSecretsStore` interface |
-| `internal/store/pairing_store.go` | `PairingStore` interface |
-| `internal/store/cron_store.go` | `CronStore` interface |
-| `internal/store/custom_tool_store.go` | `CustomToolStore` interface |
-| `internal/store/builtin_tool_store.go` | `BuiltinToolStore` interface, system tool metadata |
-| `internal/store/pending_message_store.go` | `PendingMessageStore` interface, group message queue |
-| `internal/store/knowledge_graph_store.go` | `KnowledgeGraphStore` interface, entities and relations |
-| `internal/store/contact_store.go` | `ContactStore` interface, channel contact tracking |
-| `internal/store/activity_store.go` | `ActivityStore` interface, audit logs |
-| `internal/store/snapshot_store.go` | `SnapshotStore` interface, usage aggregation |
-| `internal/store/secure_cli_store.go` | `SecureCLIStore` interface, CLI credential injection |
-| `internal/store/api_key_store.go` | `APIKeyStore` interface, gateway API keys |
-| `internal/store/episodic_store.go` | `EpisodicStore` interface, episodic summary CRUD & hybrid search (v3 new) |
-| `internal/store/evolution_store.go` | `EvolutionMetricsStore`, `EvolutionSuggestionStore` interfaces (v3 new) |
-| `internal/store/vault_store.go` | `VaultStore` interface, document registry & links (v3 new) |
-| `internal/store/agent_link_store.go` | `AgentLinkStore` interface, delegation links (v3 new) |
-| `internal/store/pg/factory.go` | PG store factory: creates all PG store instances from a connection pool |
-| `internal/store/pg/sessions.go` | `PGSessionStore`: session cache, Save, GetOrCreate |
-| `internal/store/pg/agents.go` | `PGAgentStore`: CRUD, soft delete, access control |
-| `internal/store/pg/agents_context.go` | Agent and user context file operations |
-| `internal/store/pg/teams.go` | `PGTeamStore`: teams, tasks (atomic claim), messages, delegation history |
-| `internal/store/pg/memory_docs.go` | `PGMemoryStore`: document CRUD, indexing, chunking |
-| `internal/store/pg/memory_search.go` | Hybrid search: FTS, vector, ILIKE fallback, merge |
-| `internal/store/pg/skills.go` | `PGSkillStore`: skill CRUD and grants |
-| `internal/store/pg/skills_grants.go` | Skill agent and user grants |
-| `internal/store/pg/mcp_servers.go` | `PGMCPServerStore`: server CRUD, grants, access requests |
-| `internal/store/pg/channel_instances.go` | `PGChannelInstanceStore`: channel instance CRUD |
-| `internal/store/pg/config_secrets.go` | `PGConfigSecretsStore`: encrypted config secrets |
-| `internal/store/pg/custom_tools.go` | `PGCustomToolStore`: custom tool CRUD with encrypted env |
-| `internal/store/pg/providers.go` | `PGProviderStore`: provider CRUD with encrypted keys |
-| `internal/store/pg/tracing.go` | `PGTracingStore`: traces and spans with batch insert |
-| `internal/store/pg/pool.go` | Connection pool management |
-| `internal/store/pg/helpers.go` | Nullable helpers, JSON helpers, `execMapUpdate()`, `StructScan` |
-| `internal/store/validate.go` | Input validation utilities |
-| `internal/tools/context_keys.go` | Tool context keys including `WithToolWorkspace` |
+| Module | Path | Purpose |
+|---|---|---|
+| Store interfaces | `internal/store/` | All 22+ store interfaces (`SessionStore`, `AgentStore`, `TeamStore`, etc.), `Stores` container, context propagation helpers, v3 stores (episodic, vault, evolution, agent links) |
+| PostgreSQL implementations | `internal/store/pg/` | PG factory, `PGSessionStore`, `PGAgentStore`, `PGTeamStore`, `PGMemoryStore`, and all other PG-backed implementations; connection pool; helpers |
+| SQLite implementations | `internal/store/sqlitestore/` | SQLite-backed stores for desktop/Lite edition |
+| Tool context keys | `internal/tools/context_keys.go` | Tool context keys including `WithToolWorkspace` |
+
+Use `grep` or your editor's symbol search for specific files.

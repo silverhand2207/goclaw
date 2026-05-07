@@ -25,14 +25,30 @@ func NewVaultInterceptor(vs store.VaultStore, workspace string, bus eventbus.Dom
 	return &VaultInterceptor{vaultStore: vs, workspace: workspace, eventBus: bus}
 }
 
-// inferScopeFromContext returns scope and team_id based on RunContext.
-// TeamID present → scope="team", teamID=&rc.TeamID. Absent → "personal", nil.
-func inferScopeFromContext(ctx context.Context) (scope string, teamID *string) {
+// inferScopeFromContext returns scope, team_id, and whether agent_id should be set.
+// TeamID present → scope="team", teamID=&rc.TeamID, agentOwned=false.
+// Absent → "personal", nil, agentOwned=true.
+func inferScopeFromContext(ctx context.Context) (scope string, teamID *string, agentOwned bool) {
 	rc := store.RunContextFromCtx(ctx)
 	if rc != nil && rc.TeamID != "" {
-		return "team", &rc.TeamID
+		return "team", &rc.TeamID, false
 	}
-	return "personal", nil
+	return "personal", nil, true
+}
+
+// inferChatIDFromContext returns the chat_id to stamp on a vault doc.
+// Non-nil only when team uses isolated workspace scope AND WorkspaceChatID is set.
+// Shared/personal scope → nil (team-wide, matches any chat in search).
+func inferChatIDFromContext(ctx context.Context) *string {
+	rc := store.RunContextFromCtx(ctx)
+	if rc == nil || rc.TeamID == "" || !rc.TeamIsolated {
+		return nil
+	}
+	chatID := WorkspaceChatIDFromCtx(ctx)
+	if chatID == "" {
+		return nil
+	}
+	return &chatID
 }
 
 // AfterWrite registers or updates a vault document after a file write.
@@ -56,19 +72,37 @@ func (v *VaultInterceptor) AfterWrite(ctx context.Context, resolvedPath, content
 	}
 
 	hash := vault.ContentHash([]byte(content))
-	title := inferVaultTitle(relPath)
-	docType := inferVaultDocType(relPath)
-	scope, teamID := inferScopeFromContext(ctx)
+	title := vault.InferTitle(relPath)
+	docType := vault.InferDocType(relPath)
+	scope, teamID, agentOwned := inferScopeFromContext(ctx)
+
+	// Team-scoped files belong to the team, not the creating agent.
+	var agentIDPtr *string
+	eventAgentID := ""
+	if agentOwned {
+		agentIDPtr = &agentID
+		eventAgentID = agentID
+	}
 
 	doc := &store.VaultDocument{
 		TenantID:    tenantID,
-		AgentID:     agentID,
+		AgentID:     agentIDPtr,
 		TeamID:      teamID,
+		ChatID:      inferChatIDFromContext(ctx),
 		Scope:       scope,
 		Path:        relPath,
 		Title:       title,
 		DocType:     docType,
 		ContentHash: hash,
+	}
+	// Phase 05: tag with delegation_id when write happens inside a delegated
+	// task so Phase 2.6 auto-linking can sibling-link the docs later.
+	if delegID := DelegationIDFromCtx(ctx); delegID != "" {
+		if doc.Metadata == nil {
+			doc.Metadata = make(map[string]any)
+		}
+		doc.Metadata["delegation_id"] = delegID
+		doc.Metadata["created_in"] = "delegation"
 	}
 	if err := v.vaultStore.UpsertDocument(ctx, doc); err != nil {
 		slog.Warn("vault.after_write", "path", relPath, "err", err)
@@ -80,14 +114,14 @@ func (v *VaultInterceptor) AfterWrite(ctx context.Context, resolvedPath, content
 		v.eventBus.Publish(eventbus.DomainEvent{
 			ID:        uuid.Must(uuid.NewV7()).String(),
 			Type:      eventbus.EventVaultDocUpserted,
-			SourceID:  doc.ID + ":" + hash, // unique per content version, avoids bus-level dedup suppression
+			SourceID:  doc.ID + ":" + hash,
 			TenantID:  tenantID,
-			AgentID:   agentID,
+			AgentID:   eventAgentID,
 			Timestamp: time.Now(),
 			Payload: eventbus.VaultDocUpsertedPayload{
 				DocID:       doc.ID,
 				TenantID:    tenantID,
-				AgentID:     agentID,
+				AgentID:     eventAgentID,
 				Path:        relPath,
 				ContentHash: hash,
 				Workspace:   v.workspace,
@@ -123,20 +157,37 @@ func (v *VaultInterceptor) AfterWriteMedia(ctx context.Context, resolvedPath, su
 		return
 	}
 
-	title := inferVaultTitle(relPath)
-	scope, teamID := inferScopeFromContext(ctx)
+	title := vault.InferTitle(relPath)
+	scope, teamID, agentOwned := inferScopeFromContext(ctx)
 
+	var agentIDPtr *string
+	eventAgentID := ""
+	if agentOwned {
+		agentIDPtr = &agentID
+		eventAgentID = agentID
+	}
+
+	// Build metadata carefully: mime_type always set, plus optional
+	// delegation_id / created_in when running inside a delegation.
+	// Using explicit assignment preserves any future caller-supplied keys
+	// added via a metadata-capable variant — red-team concern #18.
+	meta := map[string]any{"mime_type": mimeType}
+	if delegID := DelegationIDFromCtx(ctx); delegID != "" {
+		meta["delegation_id"] = delegID
+		meta["created_in"] = "delegation"
+	}
 	doc := &store.VaultDocument{
 		TenantID:    tenantID,
-		AgentID:     agentID,
+		AgentID:     agentIDPtr,
 		TeamID:      teamID,
+		ChatID:      inferChatIDFromContext(ctx),
 		Scope:       scope,
 		Path:        relPath,
 		Title:       title,
 		DocType:     "media",
 		ContentHash: hash,
 		Summary:     summary,
-		Metadata:    map[string]any{"mime_type": mimeType},
+		Metadata:    meta,
 	}
 	if err := v.vaultStore.UpsertDocument(ctx, doc); err != nil {
 		slog.Warn("vault.after_write_media", "path", relPath, "err", err)
@@ -150,12 +201,12 @@ func (v *VaultInterceptor) AfterWriteMedia(ctx context.Context, resolvedPath, su
 			Type:      eventbus.EventVaultDocUpserted,
 			SourceID:  doc.ID + ":" + hash,
 			TenantID:  tenantID,
-			AgentID:   agentID,
+			AgentID:   eventAgentID,
 			Timestamp: time.Now(),
 			Payload: eventbus.VaultDocUpsertedPayload{
 				DocID:       doc.ID,
 				TenantID:    tenantID,
-				AgentID:     agentID,
+				AgentID:     eventAgentID,
 				Path:        relPath,
 				ContentHash: hash,
 				Workspace:   v.workspace,
@@ -183,7 +234,11 @@ func (v *VaultInterceptor) BeforeRead(ctx context.Context, resolvedPath string) 
 		return
 	}
 
+	// Try agent-scoped first, then tenant-wide (team/shared docs have no agent_id).
 	doc, err := v.vaultStore.GetDocument(ctx, tenantID, agentID, relPath)
+	if err != nil {
+		doc, err = v.vaultStore.GetDocument(ctx, tenantID, "", relPath)
+	}
 	if err != nil {
 		return // not registered yet — skip
 	}
@@ -199,38 +254,3 @@ func (v *VaultInterceptor) BeforeRead(ctx context.Context, resolvedPath string) 
 	}
 }
 
-// inferVaultTitle extracts a human-readable title from a file path.
-func inferVaultTitle(relPath string) string {
-	base := filepath.Base(relPath)
-	ext := filepath.Ext(base)
-	return strings.TrimSuffix(base, ext)
-}
-
-// inferVaultDocType guesses doc_type from path conventions.
-// Media extension check runs first — doc_type describes content format, not location.
-func inferVaultDocType(relPath string) string {
-	lower := strings.ToLower(relPath)
-	ext := strings.ToLower(filepath.Ext(relPath))
-
-	// Media types (images, video, audio)
-	switch ext {
-	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp",
-		".mp4", ".webm", ".mov", ".avi", ".mkv",
-		".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a":
-		return "media"
-	}
-
-	// Path-based inference
-	switch {
-	case strings.HasPrefix(lower, "memory/"):
-		return "memory"
-	case strings.Contains(lower, "soul.md") || strings.Contains(lower, "identity.md") || strings.Contains(lower, "agents.md"):
-		return "context"
-	case strings.HasPrefix(lower, "skills/") || strings.HasSuffix(lower, "skill.md"):
-		return "skill"
-	case strings.HasPrefix(lower, "episodic/"):
-		return "episodic"
-	default:
-		return "note"
-	}
-}

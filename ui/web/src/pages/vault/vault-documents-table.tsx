@@ -12,6 +12,7 @@ const DOC_TYPE_COLORS: Record<string, string> = {
   skill: "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300",
   episodic: "bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300",
   media: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300",
+  document: "bg-cyan-100 text-cyan-700 dark:bg-cyan-900 dark:text-cyan-300",
 };
 
 const SCOPE_COLORS: Record<string, string> = {
@@ -80,7 +81,7 @@ export function VaultDocumentsTable({ documents, agents, loading, onSelect }: Pr
                   {doc.title || doc.path.split("/").pop()}
                 </td>
                 <td className="px-3 py-2 text-muted-foreground text-xs whitespace-nowrap">
-                  {agentMap.get(doc.agent_id) ?? doc.agent_id.slice(0, 8)}
+                  {doc.agent_id ? (agentMap.get(doc.agent_id) ?? doc.agent_id.slice(0, 8)) : t("scope.shared")}
                 </td>
                 <td className="px-3 py-2 text-muted-foreground max-w-[200px]" title={doc.path}>
                   <span className="font-mono text-xs">{truncatePath(doc.path)}</span>

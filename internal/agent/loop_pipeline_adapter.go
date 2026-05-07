@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 
+	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/eventbus"
 	"github.com/nextlevelbuilder/goclaw/internal/memory"
 	"github.com/nextlevelbuilder/goclaw/internal/pipeline"
@@ -50,14 +51,29 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 	return pipeline.PipelineDeps{
 		TokenCounter: tokencount.NewTiktokenCounter(),
 		EventBus:     l.domainBus,
+		Hooks:        l.hookDispatcher,
 		Config: pipeline.PipelineConfig{
 			MaxIterations:      maxIter,
 			MaxToolCalls:       l.maxToolCalls,
 			CheckpointInterval: 5,
 			ContextWindow:      l.contextWindow,
 			MaxTokens:          l.effectiveMaxTokens(),
+			ReserveTokens:      l.resolveReserveTokens(),
 			Compaction:         l.compactionCfg,
 			// V3 memory/retrieval flags removed — always true at runtime.
+		},
+		// Resolve per-model context window once per run. Falls back to
+		// Config.ContextWindow when registry/model is unknown (existing
+		// behaviour unchanged for tests and lite edition).
+		ResolveContextWindow: func(provider, model string) int {
+			if l.modelRegistry == nil || model == "" {
+				return 0
+			}
+			spec := l.modelRegistry.Resolve(provider, model)
+			if spec == nil {
+				return 0
+			}
+			return spec.ContextWindow
 		},
 		EmitEvent: func(event any) {
 			if ae, ok := event.(AgentEvent); ok {
@@ -98,7 +114,21 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 
 		// Prune callbacks
 		PruneMessages:   cb.pruneMessages,
+		SanitizeHistory: cb.sanitizeHistory,
 		CompactMessages: cb.compactMessages,
+
+		// Cache-TTL gate callbacks (Phase 06)
+		GetProviderCaps: func() providers.ProviderCapabilities {
+			if ca, ok := l.provider.(providers.CapabilitiesAware); ok {
+				return ca.Capabilities()
+			}
+			return providers.ProviderCapabilities{}
+		},
+		GetPruningConfig: func() *config.ContextPruningConfig {
+			return l.contextPruningCfg
+		},
+		GetCacheTouch:    l.cacheTouchAt,
+		MarkCacheTouched: l.markCacheTouched,
 
 		// Memory flush
 		RunMemoryFlush: cb.runMemoryFlush,
@@ -130,6 +160,7 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 
 		// Checkpoint + Finalize
 		FlushMessages:          cb.flushMessages,
+		PersistAssistantImages: persistAssistantImages,
 		SkillPostscript:        l.makeSkillPostscript(),
 		SanitizeContent:        cb.sanitizeContent,
 		StripMessageDirectives: StripMessageDirectives,
@@ -147,7 +178,7 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 				l.domainBus.Publish(eventbus.DomainEvent{
 					Type:     eventbus.EventSessionCompleted,
 					TenantID: l.tenantID.String(),
-					AgentID:  l.id,
+					AgentID:  l.agentUUID.String(),
 					UserID:   req.UserID,
 					SourceID: sessionKey,
 					Payload: &eventbus.SessionCompletedPayload{
@@ -215,6 +246,7 @@ func convertRunResult(pr *pipeline.RunResult) *RunResult {
 			ContentType: m.ContentType,
 			Size:        m.Size,
 			AsVoice:     m.AsVoice,
+			Prompt:      m.Prompt,
 		}
 	}
 	return &RunResult{
@@ -233,16 +265,19 @@ func convertRunResult(pr *pipeline.RunResult) *RunResult {
 
 // makeAutoInjectCallback creates the AutoInject callback that captures agent/tenant context.
 // Returns nil if autoInjector is not configured (v3 retrieval disabled or no episodic store).
-func (l *Loop) makeAutoInjectCallback(req *RunRequest) func(ctx context.Context, userMessage, userID string) (string, error) {
+// Phase 9: plumbs recentContext through to enrich vector search queries for
+// context-aware recall.
+func (l *Loop) makeAutoInjectCallback(req *RunRequest) func(ctx context.Context, userMessage, userID, recentContext string) (string, error) {
 	if l.autoInjector == nil {
 		return nil
 	}
-	return func(ctx context.Context, userMessage, userID string) (string, error) {
+	return func(ctx context.Context, userMessage, userID, recentContext string) (string, error) {
 		result, err := l.autoInjector.Inject(ctx, memory.InjectParams{
-			AgentID:     l.agentUUID.String(),
-			UserID:      userID,
-			TenantID:    store.TenantIDFromContext(ctx).String(),
-			UserMessage: userMessage,
+			AgentID:       l.agentUUID.String(),
+			UserID:        store.MemoryUserID(ctx),
+			TenantID:      store.TenantIDFromContext(ctx).String(),
+			UserMessage:   userMessage,
+			RecentContext: recentContext,
 		})
 		if err != nil || result == nil {
 			return "", err

@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,7 +44,7 @@ func NewCodexProvider(name string, tokenSource TokenSource, apiBase, defaultMode
 		name:         name,
 		apiBase:      apiBase,
 		defaultModel: defaultModel,
-		client:       &http.Client{Timeout: DefaultHTTPTimeout},
+		client:       NewDefaultHTTPClient(),
 		retryConfig:  DefaultRetryConfig(),
 		tokenSource:  tokenSource,
 	}
@@ -52,6 +53,14 @@ func NewCodexProvider(name string, tokenSource TokenSource, apiBase, defaultMode
 // WithMiddlewares sets the composed request middleware chain.
 func (p *CodexProvider) WithMiddlewares(mws ...RequestMiddleware) *CodexProvider {
 	p.middlewares = ComposeMiddlewares(mws...)
+	return p
+}
+
+// WithRetryConfig overrides the default per-provider retry config. Useful for
+// tests and for callers that manage retry semantics at a higher layer (e.g.
+// the pool router fails over on single-attempt member errors).
+func (p *CodexProvider) WithRetryConfig(rc RetryConfig) *CodexProvider {
+	p.retryConfig = rc
 	return p
 }
 
@@ -68,6 +77,7 @@ func (p *CodexProvider) Capabilities() ProviderCapabilities {
 		Thinking:         true,
 		Vision:           true,
 		CacheControl:     false,
+		ImageGeneration:  true, // Codex (OpenAI Responses API) supports native image_generation tool
 		MaxContextWindow: 1_000_000,
 		TokenizerID:      "o200k_base",
 	}
@@ -118,6 +128,10 @@ func (p *CodexProvider) middlewareConfig(req ChatRequest) MiddlewareConfig {
 }
 
 func (p *CodexProvider) ChatStream(ctx context.Context, req ChatRequest, onChunk func(StreamChunk)) (*ChatResponse, error) {
+	// stripThinking: drop reasoning summaries from ChatResponse.Thinking and
+	// onChunk callbacks. Usage.ThinkingTokens is still populated from the
+	// final response.usage payload (Phase 1 billing accuracy).
+	stripThinking, _ := req.Options[OptStripThinking].(bool)
 	body := p.buildRequestBody(req, true)
 	body = ApplyMiddlewares(body, p.middlewares, p.middlewareConfig(req))
 
@@ -127,13 +141,16 @@ func (p *CodexProvider) ChatStream(ctx context.Context, req ChatRequest, onChunk
 	if err != nil {
 		return nil, err
 	}
-	defer respBody.Close()
+	// Wrap respBody so ctx cancellation closes the socket, unblocking bufio.Scanner.
+	cb := NewCtxBody(ctx, respBody)
+	defer cb.Close()
 
 	result := &ChatResponse{FinishReason: "stop"}
 	toolCalls := make(map[string]*codexToolCallAcc) // keyed by item_id
 	streamState := newCodexMessageStreamState()
+	imageState := newCodexImageState()
 
-	sse := NewSSEScanner(respBody)
+	sse := NewSSEScanner(cb)
 	for sse.Next() {
 		data := sse.Data()
 
@@ -142,12 +159,17 @@ func (p *CodexProvider) ChatStream(ctx context.Context, req ChatRequest, onChunk
 			continue
 		}
 
-		p.processSSEEvent(&event, result, toolCalls, streamState, onChunk)
+		if err := p.processSSEEvent(&event, result, toolCalls, streamState, imageState, onChunk, stripThinking); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := sse.Err(); err != nil {
 		return nil, fmt.Errorf("%s: stream read error: %w", p.name, err)
 	}
+
+	// Assemble generated images from image accumulator into ChatResponse.
+	imageState.appendToResponse(result)
 
 	// Build tool calls from accumulators
 	for _, acc := range toolCalls {
@@ -181,8 +203,23 @@ func (p *CodexProvider) ChatStream(ctx context.Context, req ChatRequest, onChunk
 }
 
 // processSSEEvent handles a single SSE event during streaming.
-func (p *CodexProvider) processSSEEvent(event *codexSSEEvent, result *ChatResponse, toolCalls map[string]*codexToolCallAcc, streamState *codexMessageStreamState, onChunk func(StreamChunk)) {
+// stripThinking drops reasoning summaries from user-visible output while
+// leaving billing counters (Usage.ThinkingTokens) untouched.
+func (p *CodexProvider) processSSEEvent(event *codexSSEEvent, result *ChatResponse, toolCalls map[string]*codexToolCallAcc, streamState *codexMessageStreamState, imageState *codexImageState, onChunk func(StreamChunk), stripThinking bool) error {
 	switch event.Type {
+	case "response.image_generation_call.partial_image":
+		// Intermediate frame from a streaming image generation call.
+		// Deduplicate by SHA256 so identical frames are not re-emitted.
+		if imageState.recordPartial(event.ItemID, event.OutputFormat, event.PartialImageB64) {
+			if onChunk != nil {
+				onChunk(StreamChunk{Images: []ImageContent{{
+					MimeType: mimeFromFormat(event.OutputFormat),
+					Data:     event.PartialImageB64,
+					Partial:  true,
+				}}})
+			}
+		}
+
 	case "response.output_item.added":
 		if event.Item != nil {
 			streamState.registerMessageItem(event.ItemID, event.OutputIndex, event.Item)
@@ -228,23 +265,49 @@ func (p *CodexProvider) processSSEEvent(event *codexSSEEvent, result *ChatRespon
 				}
 				toolCalls[event.Item.ID] = acc
 			case "reasoning":
-				for _, s := range event.Item.Summary {
-					if s.Text != "" {
-						result.Thinking += s.Text
-						if onChunk != nil {
-							onChunk(StreamChunk{Thinking: s.Text})
+				if !stripThinking {
+					for _, s := range event.Item.Summary {
+						if s.Text != "" {
+							result.Thinking += s.Text
+							if onChunk != nil {
+								onChunk(StreamChunk{Thinking: s.Text})
+							}
 						}
 					}
+				}
+			case "image_generation_call":
+				// Final image for this item. Record and emit a non-partial chunk.
+				itemID := event.Item.ID
+				if itemID == "" {
+					itemID = event.ItemID
+				}
+				imageState.recordFinal(itemID, event.Item.OutputFormat, event.Item.Result)
+				if event.Item.Result != "" && onChunk != nil {
+					onChunk(StreamChunk{Images: []ImageContent{{
+						MimeType: mimeFromFormat(event.Item.OutputFormat),
+						Data:     event.Item.Result,
+						Partial:  false,
+					}}})
 				}
 			}
 		}
 
-	case "response.completed", "response.incomplete", "response.failed":
+	case "response.completed", "response.incomplete":
 		if event.Response != nil {
 			if result.Content == "" {
 				streamState.ingestCompletedResponse(event.Response)
 				streamState.flushCompletedResponse(result, onChunk)
 				streamState.updateResultPhase(result)
+			}
+			// Walk output[] for image_generation_call items not captured via stream events.
+			// This covers non-streaming mode (single response.completed with all outputs)
+			// and acts as a safety net for the streaming case.
+			for i := range event.Response.Output {
+				item := &event.Response.Output[i]
+				if item.Type == "image_generation_call" && item.Result != "" {
+					itemID := item.ID
+					imageState.recordFinal(itemID, item.OutputFormat, item.Result)
+				}
 			}
 			if event.Response.Usage != nil {
 				u := event.Response.Usage
@@ -261,5 +324,17 @@ func (p *CodexProvider) processSSEEvent(event *codexSSEEvent, result *ChatRespon
 				result.FinishReason = "length"
 			}
 		}
+
+	case "response.failed":
+		errMsg := "codex: response failed during generation"
+		if event.Response != nil && event.Response.Error != nil {
+			if event.Response.Error.Message != "" {
+				errMsg = fmt.Sprintf("codex: response failed: %s", event.Response.Error.Message)
+			} else if event.Response.Error.Code != "" {
+				errMsg = fmt.Sprintf("codex: response failed: %s", event.Response.Error.Code)
+			}
+		}
+		return errors.New(errMsg)
 	}
+	return nil
 }

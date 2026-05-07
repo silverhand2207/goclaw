@@ -3,9 +3,14 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
+	"github.com/nextlevelbuilder/goclaw/internal/hooks"
+	hookhandlers "github.com/nextlevelbuilder/goclaw/internal/hooks/handlers"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
 // ContextStage runs once in setup. Resolves workspace, loads context files,
@@ -23,6 +28,42 @@ func (s *ContextStage) Name() string { return "context" }
 
 // Execute populates RunState with workspace, context files, system prompt, and overhead tokens.
 func (s *ContextStage) Execute(ctx context.Context, state *RunState) error {
+	// Seed per-turn prompt-hook invocation counter exactly once per user turn.
+	// This ctx is then propagated to every downstream FireHook call (including
+	// PreToolUse in ToolStage via state.Ctx), making the per-turn cap (L2)
+	// enforceable across the whole chain.
+	ctx = hookhandlers.WithPromptTurn(ctx)
+	state.Ctx = ctx
+
+	// Hook: async SessionStart — best-effort, fires every execute call.
+	// TODO: add first-iteration-only gate once RunState.Iteration tracking is confirmed stable.
+	if s.deps != nil && s.deps.Hooks != nil {
+		go s.deps.FireHook(ctx, hooks.Event{ //nolint:errcheck
+			EventID:   uuid.NewString(),
+			SessionID: state.Input.SessionKey,
+			TenantID:  store.TenantIDFromContext(ctx),
+			AgentID:   store.AgentIDFromContext(ctx),
+			RawInput:  state.Input.Message,
+			HookEvent: hooks.EventSessionStart,
+		})
+	}
+
+	// Hook: sync UserPromptSubmit — blocking; abort if blocked. A builtin-
+	// source hook may rewrite RawInput (e.g. PII redactor); apply the update
+	// before any downstream stage reads state.Input.Message.
+	if r, _ := s.deps.FireHook(ctx, hooks.Event{
+		EventID:   uuid.NewString(),
+		SessionID: state.Input.SessionKey,
+		TenantID:  store.TenantIDFromContext(ctx),
+		AgentID:   store.AgentIDFromContext(ctx),
+		RawInput:  state.Input.Message,
+		HookEvent: hooks.EventUserPromptSubmit,
+	}); r.Decision == hooks.DecisionBlock {
+		return fmt.Errorf("hook blocked user_prompt_submit")
+	} else if r.UpdatedRawInput != nil {
+		state.Input.Message = *r.UpdatedRawInput
+	}
+
 	// 0. Inject context values (agent/tenant/user/workspace scoping, input guard, truncation).
 	// Wraps injectContext() for v3 pipeline — called once before all other context setup.
 	if s.deps.InjectContext != nil {
@@ -32,6 +73,21 @@ func (s *ContextStage) Execute(ctx context.Context, state *RunState) error {
 		}
 		ctx = enrichedCtx
 		state.Ctx = ctx
+	}
+
+	// 0.5. Resolve the effective context window for this run's provider/model.
+	// Done once here so PruneStage reads a stable value on every iteration and
+	// the budget can't drift if the model somehow changes mid-run. A zero
+	// result from the resolver (unknown model, no registry) leaves the field
+	// zero — PruneStage then falls back to Config.ContextWindow.
+	if s.deps.ResolveContextWindow != nil && state.Model != "" {
+		providerID := ""
+		if state.Provider != nil {
+			providerID = state.Provider.Name()
+		}
+		if cw := s.deps.ResolveContextWindow(providerID, state.Model); cw > 0 {
+			state.Context.EffectiveContextWindow = cw
+		}
 	}
 
 	// 1. Resolve workspace
@@ -73,10 +129,24 @@ func (s *ContextStage) Execute(ctx context.Context, state *RunState) error {
 		}
 	}
 
-	// 5. Compute overhead tokens via TokenCounter (replaces heuristic estimateOverhead)
+	// 4.5. Build filtered tools early so OverheadTokens includes tool-schema tokens.
+	// ThinkStage still calls BuildFilteredTools every iteration (tool list is
+	// iteration-dependent; final iteration strips all tools). This call is
+	// best-effort: errors are silently swallowed and the tool slice stays nil,
+	// which means overhead will under-count but remains safe/conservative.
+	if s.deps.BuildFilteredTools != nil {
+		if tools, err := s.deps.BuildFilteredTools(state); err == nil {
+			state.Think.Tools = tools
+		}
+	}
+
+	// 5. Compute overhead tokens via TokenCounter (replaces heuristic estimateOverhead).
+	// Includes both system-prompt tokens and tool-schema tokens so PruneStage
+	// budget shrinks correctly when tools are large.
 	if s.deps.TokenCounter != nil {
 		system := state.Messages.System()
 		overhead := s.deps.TokenCounter.CountMessages(state.Model, []providers.Message{system})
+		overhead += s.deps.TokenCounter.CountToolSchemas(state.Model, state.Think.Tools)
 		state.Context.OverheadTokens = overhead
 	}
 
@@ -96,8 +166,11 @@ func (s *ContextStage) Execute(ctx context.Context, state *RunState) error {
 
 	// 8. Auto-inject L0 memory context into system prompt.
 	// V3RetrievalEnabled check removed — auto-inject runs whenever AutoInject is available.
+	// Phase 9: pass recent conversation context so vector search can resolve
+	// pronouns and implicit references in follow-up questions.
 	if s.deps.AutoInject != nil && state.Input.Message != "" {
-		section, err := s.deps.AutoInject(ctx, state.Input.Message, state.Input.UserID)
+		recentCtx := buildRecentContext(state.Messages.History())
+		section, err := s.deps.AutoInject(ctx, state.Input.Message, state.Input.UserID, recentCtx)
 		if err == nil && section != "" {
 			state.Context.MemorySection = section
 			sys := state.Messages.System()
@@ -109,6 +182,50 @@ func (s *ContextStage) Execute(ctx context.Context, state *RunState) error {
 	return nil
 }
 
+// buildRecentContext concatenates the trailing user turns from the history
+// buffer into a short snippet suitable for enriching a recall query. Walks
+// backward from the end so we keep the most recent turns regardless of
+// earlier messages being pruned. Returns "" when there's no usable context.
+//
+// Budget: up to 2 user turns, max ~300 runes total. Rune (not byte) cap keeps
+// vi/zh locales safe — a byte-wise clip would slice multi-byte characters
+// and emit invalid UTF-8 to the embedding model. Tuning knob is intentional
+// here rather than config-driven — Phase 9 adds it only if operational data
+// shows variance across agent types.
+func buildRecentContext(history []providers.Message) string {
+	const maxTurns = 2
+	const maxRunes = 300
+	if len(history) == 0 {
+		return ""
+	}
+	turns := make([]string, 0, maxTurns)
+	for i := len(history) - 1; i >= 0 && len(turns) < maxTurns; i-- {
+		m := history[i]
+		if m.Role != "user" || m.Content == "" {
+			continue
+		}
+		turns = append([]string{m.Content}, turns...) // prepend to preserve order
+	}
+	if len(turns) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for i, t := range turns {
+		if i > 0 {
+			sb.WriteString(" | ")
+		}
+		sb.WriteString(t)
+	}
+	joined := sb.String()
+	// Rune-safe tail clip: keep the most recent portion of the conversation
+	// (closest in time to the current turn) rather than the oldest.
+	runes := []rune(joined)
+	if len(runes) > maxRunes {
+		joined = string(runes[len(runes)-maxRunes:])
+	}
+	return joined
+}
+
 // toAnySlice converts []bootstrap.ContextFile to []any for ContextState.ContextFiles.
 // Phase 8 will remove this when ContextState uses typed field.
 func toAnySlice(files []bootstrap.ContextFile) []any {
@@ -118,4 +235,3 @@ func toAnySlice(files []bootstrap.ContextFile) []any {
 	}
 	return out
 }
-

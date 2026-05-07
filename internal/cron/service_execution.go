@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/adhocore/gronx"
@@ -137,8 +136,20 @@ func (cs *Service) recordRunLocked(jobID string, err error, resultText string) {
 
 // --- Internal scheduling loop ---
 
-func (cs *Service) runLoop(stopChan chan struct{}) {
-	ticker := time.NewTicker(1 * time.Second)
+// runLoopTickInterval is the cron run loop tick rate. Production default = 1s.
+// Tests override this via the setFastTick(t) helper to avoid waiting >1s per
+// scheduled-job test. Production behavior is unchanged.
+//
+// The value is read synchronously inside Start() before the runLoop goroutine
+// is spawned — runLoop itself takes `tick` as a parameter so it never reads
+// this package-level var. This avoids a cross-test race where test A's Stop()
+// returns before its runLoop has executed the ticker-construction line, and
+// test B subsequently calls setFastTick(), mutating the var while test A's
+// goroutine is still racing to read it.
+var runLoopTickInterval = 1 * time.Second
+
+func (cs *Service) runLoop(stopChan chan struct{}, tick time.Duration) {
+	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 
 	for {
@@ -146,9 +157,20 @@ func (cs *Service) runLoop(stopChan chan struct{}) {
 		case <-stopChan:
 			return
 		case <-ticker.C:
-			cs.checkJobs()
+			cs.safeCheckJobs()
 		}
 	}
+}
+
+// safeCheckJobs wraps checkJobs with panic recovery so a panic in any
+// check/claim logic doesn't kill the runLoop goroutine.
+func (cs *Service) safeCheckJobs() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("cron: checkJobs panicked — runLoop continues", "panic", fmt.Sprint(r))
+		}
+	}()
+	cs.checkJobs()
 }
 
 func (cs *Service) checkJobs() {
@@ -189,17 +211,16 @@ func (cs *Service) checkJobs() {
 	cs.saveUnsafe()
 	cs.mu.Unlock()
 
-	// Execute jobs in parallel — scheduler enforces per-session serialization
-	var wg sync.WaitGroup
+	// Execute jobs in parallel without blocking the runLoop.
+	// Previously wg.Wait() blocked here — if any job hung (e.g. LLM timeout,
+	// agent loop stuck), the entire cron scheduler would stop checking for new
+	// due jobs. Now each job runs independently with panic recovery.
 	for _, dj := range dueJobs {
-		wg.Add(1)
 		go func(id string, scheduledAtMS int64) {
-			defer wg.Done()
 			defer safego.Recover(nil, "job_id", id)
 			cs.executeJobByID(id, scheduledAtMS)
 		}(dj.id, dj.scheduledAtMS)
 	}
-	wg.Wait()
 }
 
 func (cs *Service) executeJobByID(jobID string, scheduledAtMS int64) {
