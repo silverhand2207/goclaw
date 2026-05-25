@@ -1,0 +1,53 @@
+# Traefik overlay — exposes goclaw API + web dashboard via HTTPS with Traefik reverse proxy.
+#
+# Required env vars in .env:
+#   GOCLAW_URL=goclaw.example.com        (domain for API)
+#   GOCLAW_UI_URL=goclaw-ui.example.com  (domain for web dashboard)
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
+#     -f docker-compose.selfservice.yml -f docker-compose.traefik.yml up -d
+
+services:
+  goclaw:
+    networks:
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+      # HTTP router
+      - "traefik.http.routers.goclaw.rule=Host(`${GOCLAW_URL}`)"
+      - "traefik.http.routers.goclaw.entrypoints=web"
+      # Service
+      - "traefik.http.services.goclaw.loadbalancer.server.port=18790"
+      # Redirect HTTP -> HTTPS
+      - "traefik.http.routers.goclaw.middlewares=redirect-to-https@docker"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      # HTTPS router
+      - "traefik.http.routers.goclaw-secured.rule=Host(`${GOCLAW_URL}`)"
+      - "traefik.http.routers.goclaw-secured.entrypoints=web-secure"
+      - "traefik.http.routers.goclaw-secured.tls=true"
+      - "traefik.http.routers.goclaw-secured.tls.certresolver=myhttpchallenge"
+
+  goclaw-ui:
+    networks:
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+      # HTTP router
+      - "traefik.http.routers.goclaw-ui.rule=Host(`${GOCLAW_UI_URL}`)"
+      - "traefik.http.routers.goclaw-ui.entrypoints=web"
+      # Service
+      - "traefik.http.services.goclaw-ui.loadbalancer.server.port=80"
+      # Redirect HTTP -> HTTPS
+      - "traefik.http.routers.goclaw-ui.middlewares=redirect-to-https@docker"
+      # HTTPS router
+      - "traefik.http.routers.goclaw-ui-secured.rule=Host(`${GOCLAW_UI_URL}`)"
+      - "traefik.http.routers.goclaw-ui-secured.entrypoints=web-secure"
+      - "traefik.http.routers.goclaw-ui-secured.tls=true"
+      - "traefik.http.routers.goclaw-ui-secured.tls.certresolver=myhttpchallenge"
+
+networks:
+  traefik:
+    external: true

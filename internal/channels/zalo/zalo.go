@@ -465,6 +465,8 @@ func (c *Channel) callAPIWith(ctx context.Context, client *http.Client, method s
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
+	slog.Debug("zalo callAPI response", "method", method, "status", resp.StatusCode, "body", string(respData))
+
 	var apiResp zaloAPIResponse
 	if err := json.Unmarshal(respData, &apiResp); err != nil {
 		return nil, fmt.Errorf("unmarshal response: %w", err)
@@ -501,6 +503,16 @@ func (c *Channel) getUpdates(timeout int) ([]zaloUpdate, error) {
 	result, err := c.callAPIWith(ctx, c.pollClient, "getUpdates", params)
 	if err != nil {
 		return nil, err
+	}
+
+	// Log raw response for debugging Zalo API shape.
+	slog.Debug("zalo getUpdates raw response", "body", string(result))
+
+	// Zalo API may return a JSON object (single update or empty object) instead
+	// of the expected array. Detect and handle both shapes.
+	result = bytes.TrimLeft(result, " \t\r\n")
+	if len(result) == 0 {
+		return nil, nil
 	}
 
 	var update zaloUpdate
