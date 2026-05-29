@@ -21,8 +21,8 @@ services:
       # Service
       - "traefik.http.services.goclaw.loadbalancer.server.port=18790"
       # Redirect HTTP -> HTTPS
-      - "traefik.http.routers.goclaw.middlewares=redirect-to-https@docker"
-      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      - "traefik.http.routers.goclaw.middlewares=goclaw-redirect-to-https@docker"
+      - "traefik.http.middlewares.goclaw-redirect-to-https.redirectscheme.scheme=https"
       # HTTPS router
       - "traefik.http.routers.goclaw-secured.rule=Host(`${GOCLAW_URL}`)"
       - "traefik.http.routers.goclaw-secured.entrypoints=web-secure"
@@ -41,7 +41,8 @@ services:
       # Service
       - "traefik.http.services.goclaw-ui.loadbalancer.server.port=80"
       # Redirect HTTP -> HTTPS
-      - "traefik.http.routers.goclaw-ui.middlewares=redirect-to-https@docker"
+      - "traefik.http.routers.goclaw-ui.middlewares=goclaw-ui-redirect-to-https@docker"
+      - "traefik.http.middlewares.goclaw-ui-redirect-to-https.redirectscheme.scheme=https"
       # HTTPS router
       - "traefik.http.routers.goclaw-ui-secured.rule=Host(`${GOCLAW_UI_URL}`)"
       - "traefik.http.routers.goclaw-ui-secured.entrypoints=web-secure"
